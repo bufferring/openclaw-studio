@@ -1,0 +1,1352 @@
+<#
+.SYNOPSIS
+    OpenClaw Studio - Multi-Agent Orchestration Platform v5.2.0
+
+.DESCRIPTION
+    v5.2.0 - Cloud-only, thin config layer:
+      - BREAKING: Dropped local model (Ollama) support entirely - cloud providers only
+      - Removed: Install-Ollama, Ensure-OllamaRunning, Get-RecommendedContextWindow, Write-ModelsJson
+      - Default provider: google/gemini-2.0-flash (free tier)
+      - Studio is a thin config writer: writes openclaw.json presets, calls CLI, done
+      - Gateway ~800MB is OpenClaw's baseline - not something Studio can reduce
+
+    v5.1.0:
+      - Node 24 + npm (dropped bun), IPv6 fix, skills auto-import
+      - auth-profiles.json merge, context window sizing
+
+    v5.0.0 (verified against OpenClaw 2026.3.8):
+      - Telegram plugin, allowFrom, auth-profiles, gateway persistence
+      - Fixed Write-Host precedence, Get-CimInstance, $PSScriptRoot
+
+.PARAMETER Action
+    install | skills | agents | health | backup | restore | activate | checklist | prereqs
+
+.PARAMETER Debug
+    Enable verbose debug output
+
+.PARAMETER Help
+    Show this help message
+#>
+param(
+    [string]$Action = "",
+    [switch]$Debug,
+    [switch]$Help
+)
+
+Set-StrictMode -Off
+$ErrorActionPreference = "Continue"
+if ($Debug) { $DebugPreference = "Continue" }
+
+# =============================================================================
+# CONSTANTS & CONFIGURATION
+# =============================================================================
+
+$VERSION     = "5.2.0"
+$SCRIPT_DIR  = $PSScriptRoot
+$CONFIG_DIR  = Join-Path $env:USERPROFILE ".openclaw"
+$WORKSPACE_DIR = Join-Path $CONFIG_DIR "workspace"
+$AGENTS_DIR  = Join-Path $CONFIG_DIR "agents"
+$BACKUP_DIR  = Join-Path $env:USERPROFILE ".openclaw-backups"
+$LOG_FILE    = Join-Path $CONFIG_DIR "setup.log"
+$AGENTS_CONFIG = Join-Path $CONFIG_DIR "agents.json"
+
+$PROVIDERS = [ordered]@{
+    "google"     = "Google Gemini (Free tier)"
+    "groq"       = "Groq (Free tier)"
+    "zhipu"      = "Zhipu GLM (Free tier)"
+    "anthropic"  = "Anthropic Claude (Paid)"
+    "openai"     = "OpenAI GPT (Paid)"
+    "openrouter" = "OpenRouter (Multi-provider)"
+    "deepseek"   = "DeepSeek (Low cost)"
+}
+
+$PROVIDER_FREE = @("google","zhipu","groq")
+
+$PROVIDER_MODELS = @{
+    "google"     = @("gemini-2.0-flash","gemini-1.5-pro","gemini-2.5-flash","gemini-1.5-flash")
+    "groq"       = @("llama-3.3-70b","llama-3.1-8b","mixtral-8x7b")
+    "zhipu"      = @("glm-4-flash","glm-4","glm-4-plus")
+    "anthropic"  = @("claude-sonnet-4","claude-opus-4","claude-3.5-sonnet")
+    "openai"     = @("gpt-4o","gpt-4-turbo","gpt-3.5-turbo")
+    "openrouter" = @("anthropic/claude-sonnet-4","openai/gpt-4o","meta-llama/llama-3.1-70b")
+    "deepseek"   = @("deepseek-chat","deepseek-coder")
+}
+
+$PROVIDER_AUTH_ID = @{
+    "google"="google"; "anthropic"="anthropic"; "openai"="openai"
+    "groq"="groq"; "openrouter"="openrouter"; "deepseek"="deepseek"; "zhipu"="zai"
+}
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+function Write-Log {
+    param([string]$Message)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    try { "[$timestamp] $Message" | Add-Content -Path $LOG_FILE -ErrorAction SilentlyContinue } catch {}
+}
+
+function Write-Debug-Info {
+    param([string]$Message)
+    if ($Debug) { Write-Host "[DEBUG] $Message" -ForegroundColor Yellow }
+}
+
+function Show-Banner {
+    Clear-Host
+    Write-Host ""
+    Write-Host (" ██████╗ ██████╗ ███████╗███╗   ██╗ ██████╗██╗      █████╗ ██╗    ██╗") -ForegroundColor Cyan
+    Write-Host ("██╔═══██╗██╔══██╗██╔════╝████╗  ██║██╔════╝██║     ██╔══██╗██║    ██║") -ForegroundColor Cyan
+    Write-Host ("██║   ██║██████╔╝█████╗  ██╔██╗ ██║██║     ██║     ███████║██║ █╗ ██║") -ForegroundColor Cyan
+    Write-Host ("██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║") -ForegroundColor Cyan
+    Write-Host ("╚██████╔╝██║     ███████╗██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝") -ForegroundColor Cyan
+    Write-Host (" ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝") -ForegroundColor Cyan
+    Write-Host ("         ─────────────  S T U D I O  ─────────────  v$VERSION") -ForegroundColor White
+    Write-Host ("            Multi-Agent Orchestration Platform") -ForegroundColor Yellow
+    Write-Host ""
+}
+
+function Write-Header {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host ("=" * 72) -ForegroundColor Magenta
+    Write-Host "  $Title" -ForegroundColor White
+    Write-Host ("=" * 72) -ForegroundColor Magenta
+    Write-Host ""
+}
+
+function Write-Success { param([string]$Msg) Write-Host "✓ $Msg" -ForegroundColor Green;  Write-Log "OK: $Msg" }
+function Write-Err     { param([string]$Msg) Write-Host "✗ $Msg" -ForegroundColor Red;    Write-Log "ERROR: $Msg" }
+function Write-Warn    { param([string]$Msg) Write-Host "⚠ $Msg" -ForegroundColor Yellow; Write-Log "WARN: $Msg" }
+function Write-Info    { param([string]$Msg) Write-Host "ℹ $Msg" -ForegroundColor Blue }
+function Write-Step    { param([string]$Msg) Write-Host "→ $Msg" -ForegroundColor Cyan }
+
+function Confirm-Action {
+    param([string]$Prompt, [string]$Default = "n")
+    $hint = if ($Default -eq "y") { "[Y/n]" } else { "[y/N]" }
+    $input = Read-Host "$Prompt $hint"
+    if ([string]::IsNullOrWhiteSpace($input)) { return ($Default -eq "y") }
+    return ($input -match "^[Yy]")
+}
+
+function Press-Enter {
+    Write-Host ""
+    Read-Host "Press Enter to continue..." | Out-Null
+}
+
+function Test-Command {
+    param([string]$Cmd)
+    return [bool](Get-Command $Cmd -ErrorAction SilentlyContinue)
+}
+
+function Require-Jq {
+    if (-not (Test-Command "jq")) {
+        Write-Err "jq is required. Run option 1 (Install/Update OpenClaw) first."
+        return $false
+    }
+    return $true
+}
+
+# Build JSON array from comma-separated IDs (helper used in Telegram setup)
+function Build-AllowFromJson {
+    param([string]$Ids)
+    if ($Ids -eq "*") { return '["*"]' }
+    $parts = $Ids -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+    $items = $parts | ForEach-Object {
+        if ($_ -match "^\d+$") { $_ } else { "`"$_`"" }
+    }
+    return "[" + ($items -join ",") + "]"
+}
+
+# =============================================================================
+# DEPENDENCY INSTALLATION
+# =============================================================================
+
+function Install-Dependencies {
+    Write-Header "Checking Dependencies"
+
+    foreach ($cmd in @("git","curl","jq")) {
+        if (Test-Command $cmd) {
+            Write-Success "$cmd already available"
+        } else {
+            Write-Warn "$cmd not found — install via winget/choco/scoop"
+            if (Test-Command "winget") {
+                $pkgMap = @{"git"="Git.Git";"curl"="curl.curl";"jq"="jqlang.jq"}
+                if ($pkgMap.ContainsKey($cmd)) {
+                    Write-Info "Trying: winget install $($pkgMap[$cmd])"
+                    winget install $pkgMap[$cmd] --silent 2>$null | Out-Null
+                }
+            }
+        }
+    }
+}
+
+function Install-Node {
+    Write-Header "Installing Node.js 24"
+
+    if (Test-Command "node") {
+        $curVer = (node --version 2>$null) -replace '^v','' -split '\.' | Select-Object -First 1
+        if ([int]$curVer -ge 24) {
+            Write-Success "Node.js $(node --version) already installed"
+            return
+        }
+        Write-Info "Current Node.js $(node --version) is below v24. Upgrading..."
+    }
+
+    if (Test-Command "winget") {
+        Write-Info "Installing Node.js 24 via winget..."
+        winget install OpenJS.NodeJS --version "24" --silent 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "Node.js 24 installed via winget"
+            Write-Info "Reload terminal if node is not found"
+        } else {
+            Write-Warn "winget install returned non-zero; trying manual download..."
+        }
+    }
+
+    if (-not (Test-Command "node") -or ([int]((node --version 2>$null) -replace '^v','' -split '\.')[0]) -lt 24) {
+        Write-Info "Download Node.js 24 from https://nodejs.org/en/download"
+        Write-Info "Or use nvm-windows: https://github.com/coreybutler/nvm-windows"
+    }
+}
+
+# =============================================================================
+# OPENCLAW INSTALLATION
+# =============================================================================
+
+function Install-OpenClaw {
+    Write-Header "Installing OpenClaw"
+
+    if (Test-Command "openclaw") {
+        $ver = (openclaw --version 2>$null)
+        Write-Success "OpenClaw already installed ($ver)"
+        if (-not (Confirm-Action "Reinstall/update OpenClaw?" "n")) { return }
+    }
+
+    Write-Info "Installing OpenClaw via npm..."
+    npm install -g openclaw 2>&1 | Select-Object -Last 5 | ForEach-Object { Write-Host "  $_" }
+
+    if (Test-Command "openclaw") {
+        Write-Success "OpenClaw installed ($(openclaw --version 2>$null))"
+        New-Item -ItemType Directory -Force -Path $CONFIG_DIR,$WORKSPACE_DIR,$AGENTS_DIR,$BACKUP_DIR | Out-Null
+    } else {
+        Write-Err "OpenClaw installation failed — check npm and internet connection"
+    }
+}
+
+# =============================================================================
+# OPENCLAW PREREQUISITES  (required before agents/gateway work)
+# =============================================================================
+
+function Ensure-OpenClawPrerequisites {
+    Write-Header "Configuring OpenClaw Prerequisites"
+
+    if (-not (Test-Command "openclaw")) {
+        Write-Err "OpenClaw not installed. Run option 1 first."
+        return
+    }
+
+    # Seed openclaw.json if it doesn't exist (fresh install)
+    $ocConfig = Join-Path $CONFIG_DIR "openclaw.json"
+    if (-not (Test-Path $ocConfig)) {
+        Write-Info "Seeding openclaw.json (fresh install)..."
+        New-Item -ItemType Directory -Force -Path $CONFIG_DIR | Out-Null
+        '{"gateway":{"mode":"local"}}' | Set-Content -Path $ocConfig -Encoding UTF8
+        Write-Success "Created openclaw.json with gateway.mode=local"
+    }
+
+    # 1. Set gateway.mode = local (REQUIRED — gateway refuses to start without it)
+    $curMode = try { (openclaw config get gateway.mode 2>$null).Trim() } catch { "" }
+    if ($curMode -ne "local" -and $curMode -ne "remote") {
+        Write-Info "Setting gateway.mode = local..."
+        $setResult = openclaw config set gateway.mode local 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Success "gateway.mode set to local"
+        } else {
+            # Fallback: write directly to JSON (CLI may fail on fresh config)
+            Write-Warn "CLI config set failed; writing gateway.mode directly..."
+            try {
+                $cfg = if (Test-Path $ocConfig) { Get-Content $ocConfig -Raw | ConvertFrom-Json } else { [PSCustomObject]@{} }
+                if (-not $cfg.gateway) { $cfg | Add-Member -NotePropertyName "gateway" -NotePropertyValue ([PSCustomObject]@{}) }
+                $cfg.gateway | Add-Member -NotePropertyName "mode" -NotePropertyValue "local" -Force
+                $cfg | ConvertTo-Json -Depth 10 | Set-Content -Path $ocConfig -Encoding UTF8
+                Write-Success "gateway.mode written via fallback"
+            } catch {
+                Write-Err "CRITICAL: Could not set gateway.mode — gateway will not start: $_"
+            }
+        }
+    } else {
+        Write-Success "gateway.mode already set ($curMode)"
+    }
+
+    # 2. Enable Telegram plugin (required before 'openclaw channels add --channel telegram')
+    $tgStatus = openclaw plugins list 2>$null | Select-String -Pattern "telegram" -SimpleMatch | Select-String -Pattern "loaded|enabled" -SimpleMatch
+    if (-not $tgStatus) {
+        Write-Info "Enabling Telegram plugin..."
+        $result = openclaw plugins enable telegram 2>$null
+        if ($result) { Write-Success "Telegram plugin enabled" }
+        else         { Write-Warn "Could not enable Telegram plugin (may already be enabled)" }
+    } else {
+        Write-Success "Telegram plugin already enabled"
+    }
+
+    Write-Success "Prerequisites configured"
+}
+
+# =============================================================================
+# SKILLS MANAGEMENT
+# =============================================================================
+
+function Import-Skills {
+    Write-Header "Importing Skills from everything-claude-code"
+
+    $tmpDir = Join-Path $env:TEMP "everything-claude-code"
+
+    if (Test-Path $tmpDir) {
+        Write-Info "Updating skills repository..."
+        Push-Location $tmpDir
+        git pull -q 2>$null | Out-Null
+        Pop-Location
+    } else {
+        Write-Info "Cloning skills repository..."
+        git clone --depth 1 "https://github.com/affaan-m/everything-claude-code" $tmpDir -q 2>$null
+    }
+
+    if (-not (Test-Path $tmpDir)) {
+        Write-Err "Failed to clone skills repo (check internet)"
+        return
+    }
+
+    # Find openclaw skills directory
+    $openclawSkills = $null
+    foreach ($candidate in @(
+        (Join-Path (Split-Path (Get-Command openclaw -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)) "..\lib\node_modules\openclaw\skills"),
+        (Join-Path (Split-Path (Get-Command openclaw -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)) "..\node_modules\openclaw\skills"),
+        "$(npm root -g 2>$null)\openclaw\skills"
+    )) {
+        if (Test-Path $candidate) { $openclawSkills = $candidate; break }
+    }
+
+    if (-not $openclawSkills) {
+        Write-Err "Could not locate OpenClaw skills directory — install OpenClaw first"
+        return
+    }
+
+    $srcSkills = Join-Path $tmpDir "skills"
+    $before = (Get-ChildItem $openclawSkills -Directory -ErrorAction SilentlyContinue | Measure-Object).Count
+    Copy-Item "$srcSkills\*" $openclawSkills -Recurse -Force 2>$null
+    $after = (Get-ChildItem $openclawSkills -Directory -ErrorAction SilentlyContinue | Measure-Object).Count
+    Write-Success "$($after - $before) new skills imported ($after total) → $openclawSkills"
+
+    $agentsSrc = Join-Path $tmpDir "agents"
+    if (Test-Path $agentsSrc) {
+        New-Item -ItemType Directory -Force -Path $AGENTS_DIR | Out-Null
+        Copy-Item "$agentsSrc\*.md" $AGENTS_DIR -Force 2>$null
+        Write-Success "Agent definitions copied to $AGENTS_DIR"
+    }
+}
+
+function Get-Skills {
+    Write-Header "Available Skills"
+    if (Test-Command "openclaw") {
+        openclaw skills list 2>$null | Select-Object -First 50
+    } else {
+        Write-Warn "OpenClaw not installed"
+    }
+}
+
+# =============================================================================
+# NATIVE CLI INTEGRATION LAYER  (corrected for OpenClaw 2026.3.8)
+# =============================================================================
+
+function Add-TelegramChannel {
+    param([string]$AccountId, [string]$BotToken, [string]$DisplayName = "")
+    if ([string]::IsNullOrEmpty($DisplayName)) { $DisplayName = $AccountId }
+
+    Write-Debug-Info "Add-TelegramChannel: account=$AccountId name=$DisplayName"
+
+    $out = openclaw channels add --channel telegram --token $BotToken --account $AccountId --name $DisplayName 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Telegram account '$AccountId' added"
+        return $true
+    } else {
+        Write-Err "Failed to add Telegram channel for '$AccountId'"
+        Write-Info "Output: $out"
+        return $false
+    }
+}
+
+function Set-TelegramAllowlist {
+    param([string]$AccountId, [string]$AllowIds)
+
+    Write-Debug-Info "Set-TelegramAllowlist: account=$AccountId allow=$AllowIds"
+
+    $allowJson = Build-AllowFromJson -Ids $AllowIds
+    $dmPolicy  = if ($AllowIds -eq "*") { "open" } else { "allowlist" }
+
+    # Set allowFrom first, then dmPolicy (order matters for validation)
+    openclaw config set "channels.telegram.accounts.$AccountId.allowFrom" $allowJson --strict-json 2>$null | Out-Null
+    $r = openclaw config set "channels.telegram.accounts.$AccountId.dmPolicy" $dmPolicy 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Telegram DM policy: $dmPolicy (allowFrom: $AllowIds)"
+    } else {
+        Write-Warn "Could not fully set Telegram allowlist for '$AccountId'"
+        Write-Debug-Info "Output: $r"
+    }
+}
+
+function New-AgentNative {
+    param([string]$AgentId, [string]$Model, [string]$Workspace, [string]$TgAccount = "")
+
+    Write-Debug-Info "New-AgentNative: id=$AgentId model=$Model workspace=$Workspace tg=$TgAccount"
+    New-Item -ItemType Directory -Force -Path $Workspace | Out-Null
+
+    $bindArgs = @()
+    if ($TgAccount -ne "") { $bindArgs = @("--bind", "telegram:$TgAccount") }
+
+    $out = openclaw agents add $AgentId --model $Model --workspace $Workspace --non-interactive @bindArgs 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Agent '$AgentId' created via OpenClaw CLI"
+        return $true
+    } else {
+        Write-Err "openclaw agents add failed for '$AgentId'"
+        Write-Info "Output: $out"
+        return $false
+    }
+}
+
+function Set-AgentIdentity {
+    param([string]$AgentId, [string]$Name, [string]$Emoji = "🤖")
+
+    Write-Debug-Info "Set-AgentIdentity: id=$AgentId name=$Name emoji=$Emoji"
+
+    openclaw agents set-identity --agent $AgentId --name $Name --emoji $Emoji 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Identity set: $Emoji $Name"
+    } else {
+        Write-Warn "Could not set identity via CLI — writing manually"
+        $agentDir = Join-Path $AGENTS_DIR "$AgentId\agent"
+        New-Item -ItemType Directory -Force -Path $agentDir | Out-Null
+        @{name=$Name;emoji=$Emoji;theme="default"} | ConvertTo-Json | Set-Content (Join-Path $agentDir "identity.json")
+    }
+}
+
+function Write-AuthProfiles {
+    param([string]$AgentId, [string]$Provider, [string]$ApiKey)
+
+    $agentDir = Join-Path $AGENTS_DIR "$AgentId\agent"
+    New-Item -ItemType Directory -Force -Path $agentDir | Out-Null
+    $authFile = Join-Path $agentDir "auth-profiles.json"
+
+    # Load existing profiles (merge, don't overwrite)
+    $profiles = @{}
+    if (Test-Path $authFile) {
+        try {
+            $existing = Get-Content $authFile -Raw | ConvertFrom-Json
+            if ($existing.profiles) {
+                foreach ($prop in $existing.profiles.PSObject.Properties) {
+                    $profiles[$prop.Name] = $prop.Value
+                }
+            }
+        } catch {}
+    }
+
+    # Build new profile entry
+    $authProv   = if ($PROVIDER_AUTH_ID.ContainsKey($Provider)) { $PROVIDER_AUTH_ID[$Provider] } else { $Provider }
+    $profileId  = "${authProv}:manual"
+    $profileKey = $ApiKey
+
+    Write-Debug-Info "Write-AuthProfiles: agent=$AgentId profile=$profileId file=$authFile"
+
+    # Merge new entry
+    $profiles[$profileId] = [ordered]@{
+        type     = "api_key"
+        provider = $authProv
+        key      = $profileKey
+    }
+
+    # Build output object
+    $output = [ordered]@{ version = 1; profiles = [ordered]@{} }
+    foreach ($k in $profiles.Keys) { $output.profiles[$k] = $profiles[$k] }
+
+    $output | ConvertTo-Json -Depth 5 | Set-Content -Path $authFile -Encoding UTF8
+    Write-Success "Auth profile '$profileId' stored for agent '$AgentId'"
+}
+
+# =============================================================================
+# INTERACTIVE AGENT WIZARD
+# =============================================================================
+
+function New-AgentInteractive {
+    param([int]$AgentNum = 1, [int]$TotalAgents = 1)
+
+    Write-Header "Agent $AgentNum of $TotalAgents"
+
+    # --- Agent ID ---
+    $agentId = Read-Host "Agent ID (lowercase, no spaces, e.g. 'assistant')"
+    if ([string]::IsNullOrWhiteSpace($agentId)) { $agentId = "agent$AgentNum" }
+    $agentId = $agentId.ToLower() -replace "\s+",""
+
+    # --- Name ---
+    $agentName = Read-Host "Display Name (e.g. 'Personal Assistant')"
+    if ([string]::IsNullOrWhiteSpace($agentName)) { $agentName = $agentId }
+
+    # --- Emoji ---
+    $emoji = Read-Host "Emoji (default 🤖)"
+    if ([string]::IsNullOrWhiteSpace($emoji)) { $emoji = "🤖" }
+
+    # --- Profile ---
+    Write-Host ""
+    Write-Info "Agent profile describes the persona and specialization."
+    $profile = Read-Host "Profile (optional, press Enter to skip)"
+
+    # --- Model Provider ---
+    Write-Host ""
+    Write-Step "Select model provider:"
+    $providerList = @("google","groq","zhipu","anthropic","openai","openrouter","deepseek")
+    for ($i = 0; $i -lt $providerList.Count; $i++) {
+        $p = $providerList[$i]
+        $badge = if ($PROVIDER_FREE -contains $p) { "[FREE] " } else { "[PAID] " }
+        Write-Host ("  {0}) {1}{2}" -f ($i+1), $badge, $PROVIDERS[$p])
+    }
+    Write-Host ""
+    $providerChoice = Read-Host "Select provider [1-7, default=1 Google]"
+    if ([string]::IsNullOrWhiteSpace($providerChoice)) { $providerChoice = "1" }
+    $pIdx = [int]$providerChoice - 1
+    if ($pIdx -lt 0 -or $pIdx -ge $providerList.Count) { $pIdx = 0 }
+    $provider = $providerList[$pIdx]
+
+    # --- Model Selection ---
+    $models = $PROVIDER_MODELS[$provider]
+
+    Write-Host ""
+    Write-Step "Select model:"
+    for ($i = 0; $i -lt $models.Count; $i++) {
+        Write-Host ("  {0}) {1}" -f ($i+1), $models[$i])
+    }
+    Write-Host ("  {0}) Enter custom model ID" -f ($models.Count+1))
+    $modelChoice = Read-Host "Select model [default=1]"
+    if ([string]::IsNullOrWhiteSpace($modelChoice)) { $modelChoice = "1" }
+    $mIdx = [int]$modelChoice - 1
+
+    if ($mIdx -eq $models.Count) {
+        $customModel = Read-Host "Custom model ID"
+        $model = "$provider/$customModel"
+    } elseif ($mIdx -ge 0 -and $mIdx -lt $models.Count) {
+        $model = "$provider/$($models[$mIdx])"
+    } else {
+        $model = "$provider/$($models[0])"
+    }
+
+    # --- API Key ---
+    $apiKey = ""
+    Write-Host ""
+    $keyEnvVar = ($provider.ToUpper() + "_API_KEY")
+    Write-Step "API Key for $($PROVIDERS[$provider])"
+    $apiKey = Read-Host "API Key (or Enter to use `$$keyEnvVar)"
+    if ([string]::IsNullOrWhiteSpace($apiKey)) {
+        $apiKey = [Environment]::GetEnvironmentVariable($keyEnvVar) ?? ""
+        if ($apiKey) { Write-Info "Using `$$keyEnvVar from environment" }
+    }
+
+    # --- Skills ---
+    Write-Host ""
+    Write-Step "Select skills (comma-separated numbers, 'all', or Enter to skip):"
+    $skillList = @()
+
+    $ocSkillsDir = $null
+    $candidates = @(
+        (Join-Path (Split-Path (Get-Command openclaw -EA SilentlyContinue | Select-Object -Exp Source)) "..\lib\node_modules\openclaw\skills"),
+        (Join-Path (Split-Path (Get-Command openclaw -EA SilentlyContinue | Select-Object -Exp Source)) "..\node_modules\openclaw\skills"),
+        "$(npm root -g 2>$null)\openclaw\skills"
+    )
+    foreach ($c in $candidates) { if (Test-Path $c) { $ocSkillsDir = $c; break } }
+
+    if ($ocSkillsDir) {
+        $skillList = Get-ChildItem $ocSkillsDir -Directory -EA SilentlyContinue | Select-Object -First 30 -Exp Name
+    } elseif (Test-Path $AGENTS_DIR) {
+        $skillList = Get-ChildItem $AGENTS_DIR -Filter "*.md" -EA SilentlyContinue | Select-Object -First 30 -Exp BaseName
+    }
+
+    $selectedSkills = @()
+    if ($skillList.Count -gt 0) {
+        for ($i = 0; $i -lt $skillList.Count; $i++) {
+            Write-Host ("  {0,2}) {1}" -f ($i+1), $skillList[$i])
+        }
+        $skillChoice = Read-Host "Select skills"
+        if ($skillChoice -eq "all") {
+            $selectedSkills = $skillList
+        } elseif ($skillChoice) {
+            foreach ($part in ($skillChoice -split ",")) {
+                $idx = [int]$part.Trim() - 1
+                if ($idx -ge 0 -and $idx -lt $skillList.Count) { $selectedSkills += $skillList[$idx] }
+            }
+        }
+    } else {
+        Write-Info "No skills found — import skills first (option 2)"
+    }
+
+    # --- Telegram ---
+    Write-Host ""
+    Write-Header "Telegram Bot Configuration"
+    $botToken = Read-Host "Bot Token (from @BotFather, or Enter to skip)"
+    $allowIds = ""
+    if ($botToken) {
+        Write-Step "Restrict bot to specific Telegram user IDs"
+        Write-Info "Get your ID: use option 8 in main menu, or message @userinfobot"
+        $allowIds = Read-Host "Allowed User IDs (comma-separated, or '*' for all)"
+        if ([string]::IsNullOrWhiteSpace($allowIds)) { $allowIds = "*" }
+    }
+
+    # =========================================================================
+    # EXECUTE
+    # =========================================================================
+    Write-Host ""
+    Write-Header "Creating Agent: $agentName ($agentId)"
+
+    $workspace   = Join-Path $WORKSPACE_DIR $agentId
+    $nativeOk    = $true
+
+    # Step 1: Add Telegram channel
+    if ($botToken) {
+        if (Add-TelegramChannel -AccountId $agentId -BotToken $botToken -DisplayName $agentName) {
+            Set-TelegramAllowlist -AccountId $agentId -AllowIds $allowIds
+        } else {
+            Write-Warn "Telegram setup failed; agent will be created without Telegram"
+            $botToken = ""
+        }
+    }
+
+    # Step 2: Create agent
+    $tgBind = if ($botToken) { $agentId } else { "" }
+    if (-not (New-AgentNative -AgentId $agentId -Model $model -Workspace $workspace -TgAccount $tgBind)) {
+        Write-Warn "Native CLI agent creation failed; saving config manually"
+        $nativeOk = $false
+    }
+
+    # Step 3: Set identity
+    Set-AgentIdentity -AgentId $agentId -Name $agentName -Emoji $emoji
+
+    # Step 4: Store auth in auth-profiles.json
+    Write-AuthProfiles -AgentId $agentId -Provider $provider -ApiKey $apiKey
+
+    # Step 5: Write profile
+    if ($profile) {
+        New-Item -ItemType Directory -Force -Path $workspace | Out-Null
+        "# $agentName`n`n$profile" | Set-Content (Join-Path $workspace "IDENTITY.md") -Encoding UTF8
+    }
+
+    # Step 6: Track in agents.json
+    New-Item -ItemType Directory -Force -Path $CONFIG_DIR | Out-Null
+    if (-not (Test-Path $AGENTS_CONFIG)) {
+        '{"agents":{},"default_agent":null}' | Set-Content $AGENTS_CONFIG -Encoding UTF8
+    }
+
+    $rec = [ordered]@{
+        id          = $agentId
+        name        = $agentName
+        emoji       = $emoji
+        profile     = $profile
+        model       = $model
+        bot_token   = $botToken
+        allow_from  = @($allowIds)
+        skills      = $selectedSkills
+        created_at  = (Get-Date -Format "o")
+        native_cli  = $nativeOk
+    }
+
+    try {
+        $cfg = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+        $cfg.agents | Add-Member -NotePropertyName $agentId -NotePropertyValue $rec -Force
+        $cfg | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
+    } catch {
+        Write-Warn "Could not update agents.json: $_"
+    }
+
+    Write-Host ""
+    Write-Success "Agent '$emoji $agentName' ($agentId) configured"
+    if ($botToken) {
+        $policyLabel = if ($allowIds -eq "*") { "open" } else { "allowlist" }
+        Write-Info "Telegram: bot connected, dmPolicy=$policyLabel"
+    }
+    Write-Info "Model: $model"
+    Write-Info "Run option 7 (Activate Agents) to start the gateway"
+}
+
+function Setup-MultiAgent {
+    Write-Header "Multi-Agent Setup"
+    Write-Host ""
+    Write-Info "Configure multiple agents, each with their own:"
+    Write-Host "  • Telegram bot token + allowed user IDs"
+    Write-Host "  • Model, API key, and skills"
+    Write-Host "  • Display name and persona profile"
+    Write-Host ""
+
+    $numStr = Read-Host "How many agents to configure? [1-10]"
+    $num = [int]$numStr
+    if ($num -lt 1) { $num = 1 }
+    if ($num -gt 10) { $num = 10 }
+
+    for ($i = 1; $i -le $num; $i++) {
+        New-AgentInteractive -AgentNum $i -TotalAgents $num
+        Write-Host ""
+        if ($i -lt $num) { Press-Enter }
+    }
+
+    Write-Header "Agents Configured"
+    Get-Agents
+}
+
+# =============================================================================
+# AGENT-POOL.JSON DEPLOYMENT
+# =============================================================================
+
+function Deploy-FromAgentPool {
+    Write-Header "Deploy from agent-pool.json"
+
+    $poolFile = Join-Path $SCRIPT_DIR "agent-pool.json"
+
+    if (-not (Test-Path $poolFile)) {
+        Write-Warn "No agent-pool.json found"
+        Write-Info "Creating sample..."
+        @'
+{
+  "agents": {
+    "orchestrator": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["chief-of-staff"],
+      "description": "Routes tasks to specialists",
+      "role": "Orchestration"
+    },
+    "python-dev": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["coding-agent"],
+      "description": "Python backend specialist",
+      "role": "Python development"
+    }
+  },
+  "routing": {
+    "python": ["python-dev"],
+    "architecture": ["orchestrator"]
+  }
+}
+'@ | Set-Content $poolFile -Encoding UTF8
+        Write-Success "Sample agent-pool.json created — edit and re-run"
+        return
+    }
+
+    if (-not (Require-Jq)) { return }
+
+    $poolJson  = Get-Content $poolFile -Raw | ConvertFrom-Json
+    $agentIds  = $poolJson.agents.PSObject.Properties.Name
+    $agentCount = $agentIds.Count
+
+    if ($agentCount -eq 0) { Write-Err "No agents in agent-pool.json"; return }
+
+    Write-Info "Found $agentCount agents:"
+    foreach ($id in $agentIds) {
+        $role = $poolJson.agents.$id.role ?? "Agent"
+        $sc   = ($poolJson.agents.$id.skills ?? @()).Count
+        Write-Host ("  {0,-20} {1} ({2} skills)" -f $id, $role, $sc)
+    }
+    Write-Host ""
+
+    if (-not (Confirm-Action "Deploy these $agentCount agents?" "y")) {
+        Write-Info "Cancelled"
+        return
+    }
+
+    $ok = 0; $fail = 0
+    foreach ($agentId in $agentIds) {
+        Write-Host ""
+        Write-Step "Deploying: $agentId"
+        $model     = $poolJson.agents.$agentId.model ?? "google/gemini-2.0-flash"
+        $role      = $poolJson.agents.$agentId.role  ?? "Agent"
+        $workspace = Join-Path $WORKSPACE_DIR $agentId
+
+        if (New-AgentNative -AgentId $agentId -Model $model -Workspace $workspace) {
+            $ok++
+            Set-AgentIdentity -AgentId $agentId -Name $role -Emoji "🤖"
+
+            # Write auth-profiles.json
+            $poolProvider = ($model -split "/")[0]
+            $poolApiKey   = $poolJson.agents.$agentId.api_key
+            Write-AuthProfiles -AgentId $agentId -Provider $poolProvider -ApiKey $poolApiKey
+        } else { $fail++ }
+    }
+
+    Write-Host ""
+    Write-Header "Deployment Summary"
+    Write-Success "Deployed: $ok agents"
+    if ($fail -gt 0) { Write-Err "Failed: $fail agents" }
+}
+
+# =============================================================================
+# AGENT MANAGEMENT
+# =============================================================================
+
+function Get-Agents {
+    Write-Header "Configured Agents"
+
+    if (Test-Command "openclaw") {
+        Write-Info "From OpenClaw CLI:"
+        openclaw agents list --bindings 2>$null
+        Write-Host ""
+    }
+
+    if (-not (Test-Path $AGENTS_CONFIG)) { Write-Info "(No local agents.json)"; return }
+    try {
+        $cfg   = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+        $count = ($cfg.agents.PSObject.Properties | Measure-Object).Count
+        if ($count -eq 0) { return }
+        Write-Info "From local tracking: $count agent(s)"
+        foreach ($prop in $cfg.agents.PSObject.Properties) {
+            $a = $prop.Value
+            $botStatus = if ($a.bot_token) { "configured" } else { "not set" }
+            Write-Host ("  {0} {1}: {2} [{3}]" -f ($a.emoji ?? "🤖"), $prop.Name, ($a.name ?? $prop.Name), ($a.model ?? "no model"))
+            Write-Host ("    Bot: $botStatus  |  Allowed: $($a.allow_from -join ', ')")
+        }
+    } catch { Write-Warn "Could not parse agents.json" }
+}
+
+function Edit-Agent {
+    Write-Header "Edit Agent"
+    if (-not (Require-Jq)) { return }
+    if (-not (Test-Path $AGENTS_CONFIG)) { Write-Warn "No agents configured"; return }
+
+    $cfg    = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+    $agents = $cfg.agents.PSObject.Properties.Name
+    if ($agents.Count -eq 0) { Write-Warn "No agents configured"; return }
+
+    for ($i = 0; $i -lt $agents.Count; $i++) {
+        Write-Host ("  {0}) {1}: {2}" -f ($i+1), $agents[$i], ($cfg.agents.($agents[$i]).name ?? $agents[$i]))
+    }
+    Write-Host ""
+    $choice = [int](Read-Host "Select agent to edit") - 1
+    if ($choice -lt 0 -or $choice -ge $agents.Count) { Write-Err "Invalid selection"; return }
+
+    $agentId  = $agents[$choice]
+    $a        = $cfg.agents.$agentId
+    $newName  = Read-Host "Name [$($a.name)] (Enter to keep)"
+    $newModel = Read-Host "Model [$($a.model)] (Enter to keep)"
+    $newBot   = Read-Host "Bot Token [$(if($a.bot_token){'configured'}else{'none'})] (Enter to keep)"
+    $newAllow = Read-Host "Allowed IDs [$($a.allow_from -join ', ')] (Enter to keep)"
+
+    if ($newName)  { $a.name       = $newName  }
+    if ($newModel) {
+        $a.model = $newModel
+        $newProvider = ($newModel -split "/")[0]
+        $newKey = Read-Host "API key for $newProvider (Enter to skip)"
+        Write-AuthProfiles -AgentId $agentId -Provider $newProvider -ApiKey $newKey
+    }
+    if ($newBot)   { $a.bot_token  = $newBot; Add-TelegramChannel -AccountId $agentId -BotToken $newBot -DisplayName ($newName ?? $a.name) }
+    if ($newAllow) { $a.allow_from = @($newAllow); Set-TelegramAllowlist -AccountId $agentId -AllowIds $newAllow }
+
+    $cfg | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
+    Write-Success "Agent '$agentId' updated"
+}
+
+function Remove-Agent {
+    Write-Header "Delete Agent"
+    if (-not (Require-Jq)) { return }
+    if (-not (Test-Path $AGENTS_CONFIG)) { Write-Warn "No agents configured"; return }
+
+    $cfg    = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+    $agents = $cfg.agents.PSObject.Properties.Name
+    if ($agents.Count -eq 0) { Write-Warn "No agents configured"; return }
+
+    for ($i = 0; $i -lt $agents.Count; $i++) {
+        Write-Host ("  {0}) {1}" -f ($i+1), $agents[$i])
+    }
+    $choice = [int](Read-Host "Select agent to delete") - 1
+    if ($choice -lt 0 -or $choice -ge $agents.Count) { Write-Err "Invalid selection"; return }
+
+    $agentId = $agents[$choice]
+    if (Confirm-Action "Delete '$agentId'? Removes from OpenClaw too." "n") {
+        openclaw agents delete $agentId 2>$null | Out-Null
+        $cfg.agents.PSObject.Properties.Remove($agentId)
+        $cfg | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
+        Write-Success "Agent '$agentId' deleted"
+    }
+}
+
+# =============================================================================
+# GATEWAY MANAGEMENT  (corrected: openclaw gateway install/start)
+# =============================================================================
+
+function Test-PortInUse {
+    param([int]$Port)
+    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    return [bool]$conn
+}
+
+function Start-Gateway {
+    Write-Header "Activate Agents (Start Gateway)"
+
+    if (-not (Test-Command "openclaw")) {
+        Write-Err "OpenClaw not installed. Run option 1 first."
+        return
+    }
+
+    Ensure-OpenClawPrerequisites
+
+    # Install gateway service (idempotent — safe to call multiple times)
+    # Uses node runtime (Node 24+). If IPv6 issues cause Telegram timeouts,
+    # disable IPv6 via: netsh interface ipv6 set state disabled
+    Write-Info "Installing gateway service (node runtime)..."
+    openclaw gateway install --runtime node 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Gateway service installed (Task Scheduler)"
+    } else {
+        Write-Warn "Gateway service install returned non-zero (may already be installed)"
+    }
+
+    # Start or restart
+    $gwStatus = openclaw gateway status 2>$null
+    $started  = $false
+
+    if ($gwStatus -match "running|active") {
+        Write-Info "Gateway running; restarting to apply config..."
+        openclaw gateway restart 2>$null | Out-Null
+        $started = ($LASTEXITCODE -eq 0)
+    } else {
+        openclaw gateway start 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $started = $true
+        } else {
+            Write-Warn "Service start failed; starting in foreground (background process)..."
+            $proc = Start-Process -FilePath "openclaw" -ArgumentList "gateway run" `
+                -WindowStyle Hidden -PassThru
+            Start-Sleep -Seconds 5
+            $started = Test-PortInUse -Port 18789
+        }
+    }
+
+    if (-not $started) {
+        Write-Err "Gateway failed to start"
+        Write-Info "Check logs: openclaw logs"
+        return
+    }
+
+    Write-Success "Gateway started"
+    Start-Sleep -Seconds 3
+    Show-Checklist
+}
+
+# =============================================================================
+# FINAL CHECKLIST  (NEW — live status of all components)
+# =============================================================================
+
+function Show-Checklist {
+    Write-Header "Active System Checklist"
+
+    Write-Host ""
+    Write-Info "── Dependencies ──"
+    foreach ($cmd in @("openclaw","node","jq","curl")) {
+        if (Test-Command $cmd) {
+            $ver = & $cmd --version 2>$null | Select-Object -First 1
+            Write-Host ("  {0,-3} {1,-12} {2}" -f "✓", $cmd, $ver) -ForegroundColor Green
+        } else {
+            Write-Host ("  {0,-3} {1,-12} NOT FOUND" -f "✗", $cmd) -ForegroundColor Red
+        }
+    }
+
+    Write-Host ""
+    Write-Info "── Gateway ──"
+    $health = openclaw health 2>$null
+    if ($health -match "OK") {
+        Write-Host "  ✓ Gateway: running (port 18789)" -ForegroundColor Green
+    } else {
+        Write-Host "  ✗ Gateway: not responding" -ForegroundColor Red
+        Write-Info "    Start with: openclaw gateway start"
+    }
+
+    # Task Scheduler persistence
+    $task = Get-ScheduledTask -TaskName "OpenClaw Gateway" -ErrorAction SilentlyContinue
+    if ($task -and $task.State -ne "Disabled") {
+        Write-Host "  ✓ Task Scheduler: registered (survives reboot)" -ForegroundColor Green
+    } else {
+        Write-Host "  ⚠ Task Scheduler: not registered (run Activate Agents to install)" -ForegroundColor Yellow
+    }
+
+    Write-Host ""
+    Write-Info "── Agents ──"
+    $agentJson = openclaw agents list --json 2>$null
+    if ($agentJson) {
+        try {
+            $agList = $agentJson | ConvertFrom-Json
+            Write-Host ("  ✓ {0} agent(s) configured:" -f $agList.Count) -ForegroundColor Green
+            foreach ($ag in $agList) {
+                $star   = if ($ag.isDefault) { "★" } else { " " }
+                $bdstr  = if ($ag.bindingDetails) { $ag.bindingDetails -join ", " } else { "no bindings" }
+                Write-Host ("    $star {0,-15} model={1}  {2}" -f $ag.id, ($ag.model ?? "inherited"), $bdstr)
+            }
+        } catch {
+            Write-Host "  ⚠ Could not parse agent list" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  ⚠ No agents configured (use option 3)" -ForegroundColor Yellow
+    }
+
+    Write-Host ""
+    Write-Info "── Telegram Channels ──"
+    $chStatus = openclaw channels status 2>$null
+    if ($chStatus) {
+        $chStatus -split "`n" | Where-Object { $_ -match "telegram|Telegram" } | ForEach-Object {
+            $color = if ($_ -match "running")        { "Green"  }
+                     elseif ($_ -match "error|stop") { "Red"    }
+                     else                             { "Blue"   }
+            Write-Host "  $_" -ForegroundColor $color
+        }
+    } else {
+        Write-Host "  ⚠ Could not query channel status" -ForegroundColor Yellow
+    }
+
+    Write-Host ""
+    Write-Info "── Skills ──"
+    if (Test-Command "openclaw") {
+        $sc = (openclaw skills list 2>$null | Measure-Object -Line).Lines
+        if ($sc -gt 1) {
+            Write-Host ("  ✓ Skills available: {0}" -f $sc) -ForegroundColor Green
+        } else {
+            Write-Host "  ⚠ No skills (use option 2 to import)" -ForegroundColor Yellow
+        }
+    }
+
+    # Save to status file
+    try {
+        $statusPath = Join-Path $CONFIG_DIR "status.md"
+        @(
+            "# OpenClaw Status — $(Get-Date)",
+            "", "## Agents",
+            (openclaw agents list 2>$null),
+            "", "## Channels",
+            (openclaw channels status 2>$null),
+            "", "## Gateway",
+            (openclaw gateway status 2>$null)
+        ) | Set-Content $statusPath -Encoding UTF8
+        Write-Host ""
+        Write-Info "Status saved to: $statusPath"
+    } catch {}
+}
+
+# =============================================================================
+# TELEGRAM BOT UTILITIES
+# =============================================================================
+
+function Get-TelegramUserId {
+    Write-Header "Get Telegram User ID"
+    if (-not (Require-Jq)) { return }
+
+    $botToken = ""
+    if (Test-Path $AGENTS_CONFIG) {
+        try {
+            $cfg = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+            $bot = $cfg.agents.PSObject.Properties.Value | Where-Object { $_.bot_token } | Select-Object -First 1
+            if ($bot) { $botToken = $bot.bot_token }
+        } catch {}
+    }
+    if (-not $botToken) { $botToken = Read-Host "Enter bot token" }
+    if (-not $botToken) { Write-Err "No bot token provided"; return }
+
+    Write-Info "Send a message to your bot, then press Enter..."
+    Read-Host | Out-Null
+
+    try {
+        $resp = Invoke-RestMethod "https://api.telegram.org/bot$botToken/getUpdates" -Method Get -TimeoutSec 10
+        $last = $resp.result | Select-Object -Last 1
+        if ($last) {
+            $uid   = $last.message.from.id
+            $uname = $last.message.from.username
+            $fname = $last.message.from.first_name
+            Write-Host ""
+            Write-Success "User found:"
+            Write-Host "  ID:       $uid"
+            if ($uname) { Write-Host "  Username: @$uname" }
+            if ($fname) { Write-Host "  Name:     $fname" }
+            Write-Host ""
+            Write-Info "Add this ID to an agent's allowlist via option 4 (Edit Agent)"
+        } else {
+            Write-Err "No messages found — did you send a message to your bot?"
+        }
+    } catch {
+        Write-Err "Failed to reach Telegram API: $_"
+    }
+}
+
+function Test-TelegramBot {
+    Write-Header "Test Telegram Bot"
+    $botToken = ""
+    if (Test-Path $AGENTS_CONFIG) {
+        try {
+            $cfg = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+            $bot = $cfg.agents.PSObject.Properties.Value | Where-Object { $_.bot_token } | Select-Object -First 1
+            if ($bot) { $botToken = $bot.bot_token }
+        } catch {}
+    }
+    if (-not $botToken) { $botToken = Read-Host "Enter bot token" }
+    if (-not $botToken) { Write-Err "No bot token provided"; return }
+
+    Write-Info "Testing bot connection..."
+    try {
+        $me = Invoke-RestMethod "https://api.telegram.org/bot$botToken/getMe" -TimeoutSec 10
+        if ($me.ok) {
+            Write-Success "Bot connected: $($me.result.first_name) (@$($me.result.username))"
+        } else {
+            Write-Err "Bot connection failed: $($me.description)"
+        }
+    } catch {
+        Write-Err "Request failed: $_"
+    }
+}
+
+# =============================================================================
+# HEALTH CHECK
+# =============================================================================
+
+function Test-Health {
+    Write-Header "System Health Check"
+    $passed = 0; $warnings = 0; $failed = 0
+
+    Write-Host ""
+    Write-Info "Checking dependencies..."
+    foreach ($cmd in @("curl","git","jq","node","npm")) {
+        if (Test-Command $cmd) {
+            $ver = & $cmd --version 2>$null | Select-Object -First 1
+            Write-Success "$cmd : $ver"
+            $passed++
+        } else {
+            Write-Err "$cmd : NOT FOUND"
+            $failed++
+        }
+    }
+    Write-Host ""
+    Write-Info "Checking OpenClaw..."
+    if (Test-Command "openclaw") {
+        Write-Success "OpenClaw: $(openclaw --version 2>$null)"
+        $passed++
+    } else {
+        Write-Err "OpenClaw: NOT INSTALLED"
+        $failed++
+    }
+
+    Write-Host ""
+    Write-Info "Checking gateway..."
+    $health = openclaw health 2>$null
+    if ($health -match "OK") {
+        Write-Success "Gateway: running"
+        $passed++
+    } else {
+        Write-Warn "Gateway: not running (use option 7 to start)"
+        $warnings++
+    }
+
+    Write-Host ""
+    Write-Header "Health Check Summary"
+    Write-Success "$passed checks passed"
+    if ($warnings -gt 0) { Write-Warn "$warnings warnings" }
+    if ($failed   -gt 0) { Write-Err  "$failed checks failed" }
+}
+
+# =============================================================================
+# BACKUP & RESTORE
+# =============================================================================
+
+function New-Backup {
+    Write-Header "Creating Backup"
+    New-Item -ItemType Directory -Force -Path $BACKUP_DIR | Out-Null
+    $timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backupFile = Join-Path $BACKUP_DIR "openclaw_backup_$timestamp.zip"
+    try {
+        Compress-Archive -Path $CONFIG_DIR -DestinationPath $backupFile -Force
+        $size = [math]::Round((Get-Item $backupFile).Length / 1MB, 2)
+        Write-Success "Backup created: $backupFile (${size}MB)"
+    } catch {
+        Write-Err "Backup failed: $_"
+    }
+}
+
+function Restore-Backup {
+    Write-Header "Restore from Backup"
+    $backups = Get-ChildItem $BACKUP_DIR -Filter "openclaw_backup_*.zip" -ErrorAction SilentlyContinue |
+               Sort-Object LastWriteTime -Descending
+    if ($backups.Count -eq 0) { Write-Warn "No backups found"; return }
+
+    for ($i = 0; $i -lt $backups.Count; $i++) {
+        $sz = [math]::Round($backups[$i].Length / 1MB, 2)
+        Write-Host ("  {0}) {1} ({2}MB)" -f ($i+1), $backups[$i].Name, $sz)
+    }
+    $choice = [int](Read-Host "Select backup to restore") - 1
+    if ($choice -lt 0 -or $choice -ge $backups.Count) { Write-Err "Invalid selection"; return }
+
+    if (Confirm-Action "This will overwrite ~/.openclaw. Continue?" "n") {
+        try {
+            Expand-Archive -Path $backups[$choice].FullName -DestinationPath $env:USERPROFILE -Force
+            Write-Success "Backup restored"
+        } catch {
+            Write-Err "Restore failed: $_"
+        }
+    }
+}
+
+# =============================================================================
+# MAIN MENU
+# =============================================================================
+
+function Show-MainMenu {
+    Show-Banner
+    Write-Host "  Main Menu" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Setup" -ForegroundColor Bold
+    Write-Host "  " -NoNewline; Write-Host "1." -ForegroundColor Cyan -NoNewline; Write-Host " Install/Update OpenClaw"
+    Write-Host "  " -NoNewline; Write-Host "2." -ForegroundColor Cyan -NoNewline; Write-Host " Import Skills from everything-claude-code"
+    Write-Host ""
+    Write-Host "  Multi-Agent Management" -ForegroundColor White
+    Write-Host "  " -NoNewline; Write-Host "3." -ForegroundColor Cyan -NoNewline; Write-Host " Configure Agents (Create/Edit/Delete)"
+    Write-Host "  " -NoNewline; Write-Host "4." -ForegroundColor Cyan -NoNewline; Write-Host " Deploy from agent-pool.json"
+    Write-Host "  " -NoNewline; Write-Host "5." -ForegroundColor Cyan -NoNewline; Write-Host " List Configured Agents"
+    Write-Host "  " -NoNewline; Write-Host "6." -ForegroundColor Cyan -NoNewline; Write-Host " Show Active Checklist"
+    Write-Host "  " -NoNewline; Write-Host "7." -ForegroundColor Cyan -NoNewline; Write-Host " Activate Agents (Start Gateway)"
+    Write-Host ""
+    Write-Host "  Telegram Bot" -ForegroundColor White
+    Write-Host "  " -NoNewline; Write-Host "8." -ForegroundColor Cyan -NoNewline; Write-Host " Get Telegram User ID"
+    Write-Host "  " -NoNewline; Write-Host "9." -ForegroundColor Cyan -NoNewline; Write-Host " Test Telegram Bot Connection"
+    Write-Host ""
+    Write-Host "  System" -ForegroundColor White
+    Write-Host "  " -NoNewline; Write-Host "10." -ForegroundColor Cyan -NoNewline; Write-Host " Health Check"
+    Write-Host "  " -NoNewline; Write-Host "11." -ForegroundColor Cyan -NoNewline; Write-Host " Backup/Restore"
+    Write-Host ""
+    Write-Host "  " -NoNewline; Write-Host "0." -ForegroundColor Magenta -NoNewline; Write-Host " Exit"
+    Write-Host ""
+}
+
+function Show-InstallMenu {
+    Show-Banner
+    Write-Header "Installation & Setup"
+
+    Install-Dependencies
+    Install-Node
+
+    Install-OpenClaw
+    Ensure-OpenClawPrerequisites
+
+    # Auto-import skills — agents need these out-of-the-box
+    Import-Skills
+
+    Press-Enter
+}
+
+function Show-AgentMenu {
+    while ($true) {
+        Show-Banner
+        Write-Header "Agent Management"
+        Write-Host "  Quick Actions" -ForegroundColor White
+        Write-Host "  " -NoNewline; Write-Host "1." -ForegroundColor Cyan -NoNewline; Write-Host " Create New Agent"
+        Write-Host "  " -NoNewline; Write-Host "2." -ForegroundColor Cyan -NoNewline; Write-Host " Setup Multiple Agents"
+        Write-Host "  " -NoNewline; Write-Host "3." -ForegroundColor Cyan -NoNewline; Write-Host " List Agents"
+        Write-Host "  " -NoNewline; Write-Host "4." -ForegroundColor Cyan -NoNewline; Write-Host " Edit Agent"
+        Write-Host "  " -NoNewline; Write-Host "5." -ForegroundColor Cyan -NoNewline; Write-Host " Delete Agent"
+        Write-Host ""
+        Write-Host "  Skills" -ForegroundColor White
+        Write-Host "  " -NoNewline; Write-Host "6." -ForegroundColor Cyan -NoNewline; Write-Host " List Available Skills"
+        Write-Host "  " -NoNewline; Write-Host "7." -ForegroundColor Cyan -NoNewline; Write-Host " Import Skills"
+        Write-Host ""
+        Write-Host "  " -NoNewline; Write-Host "0." -ForegroundColor Magenta -NoNewline; Write-Host " Back"
+        Write-Host ""
+
+        $choice = Read-Host "Select option"
+        switch ($choice) {
+            "1" { New-AgentInteractive -AgentNum 1 -TotalAgents 1; Press-Enter }
+            "2" { Setup-MultiAgent; Press-Enter }
+            "3" { Get-Agents; Press-Enter }
+            "4" { Edit-Agent; Press-Enter }
+            "5" { Remove-Agent; Press-Enter }
+            "6" { Get-Skills; Press-Enter }
+            "7" { Import-Skills; Press-Enter }
+            "0" { return }
+            default { Write-Warn "Invalid option"; Start-Sleep -Seconds 1 }
+        }
+    }
+}
+
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
+
+function Main {
+    New-Item -ItemType Directory -Force -Path $CONFIG_DIR,$BACKUP_DIR | Out-Null
+    "" | Out-File -FilePath $LOG_FILE -Encoding UTF8 -Append
+
+    switch ($Action.ToLower()) {
+        "install"  { Show-InstallMenu; return }
+        "setup"    { Show-InstallMenu; return }
+        "skills"   { Import-Skills; return }
+        "agents"   { Show-AgentMenu; return }
+        "health"   { Test-Health; return }
+        "check"    { Test-Health; return }
+        "backup"   { New-Backup; return }
+        "restore"  { Restore-Backup; return }
+        "activate" { Start-Gateway; return }
+        "checklist"{ Show-Checklist; return }
+        "prereqs"  { Ensure-OpenClawPrerequisites; return }
+    }
+
+    while ($true) {
+        Show-MainMenu
+        $choice = Read-Host "Select option"
+        switch ($choice) {
+            "1"  { Show-InstallMenu }
+            "2"  { Import-Skills; Press-Enter }
+            "3"  { Show-AgentMenu }
+            "4"  { Deploy-FromAgentPool; Press-Enter }
+            "5"  { Get-Agents; Press-Enter }
+            "6"  { Show-Checklist; Press-Enter }
+            "7"  { Start-Gateway; Press-Enter }
+            "8"  { Get-TelegramUserId; Press-Enter }
+            "9"  { Test-TelegramBot; Press-Enter }
+            "10" { Test-Health; Press-Enter }
+            "11" {
+                Show-Banner
+                Write-Header "Backup & Restore"
+                Write-Host "  " -NoNewline; Write-Host "1." -ForegroundColor Cyan -NoNewline; Write-Host " Create Backup"
+                Write-Host "  " -NoNewline; Write-Host "2." -ForegroundColor Cyan -NoNewline; Write-Host " Restore Backup"
+                Write-Host ""
+                Write-Host "  " -NoNewline; Write-Host "0." -ForegroundColor Magenta -NoNewline; Write-Host " Back"
+                $sub = Read-Host "Select option"
+                switch ($sub) { "1" { New-Backup } "2" { Restore-Backup } }
+                Press-Enter
+            }
+            "0"  { Show-Banner; Write-Host "Goodbye!" -ForegroundColor Green; exit }
+            default { Write-Warn "Invalid option"; Start-Sleep -Seconds 1 }
+        }
+    }
+}
+
+# =============================================================================
+# SHOW HELP
+# =============================================================================
+if ($Help) {
+    Write-Host @"
+OpenClaw Studio v$VERSION - Multi-Agent Orchestration Platform
+
+Usage: .\openclaw-setup.ps1 [-Action <action>] [-Debug] [-Help]
+
+Actions:
+  install    Install OpenClaw and dependencies
+  skills     Import skills from everything-claude-code
+  agents     Manage agents
+  health     Run system health check
+  backup     Create backup
+  restore    Restore from backup
+  activate   Start gateway with configured agents
+  checklist  Show live status checklist
+  prereqs    Configure gateway.mode + enable Telegram plugin
+
+Options:
+  -Debug     Enable verbose debug output
+  -Help      Show this help message
+"@
+    exit
+}
+
+Main

@@ -1,0 +1,125 @@
+{
+  "$schema": "https://openclaw.ai/schemas/agent-pool.json",
+  "version": "2.0",
+  "description": "Multi-agent pool configuration for everything-claude-code skills",
+  "agents": {
+    "orchestrator": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["chief-of-staff"],
+      "description": "Routes tasks to specialists and coordinates cross-cutting concerns",
+      "role": "Orchestration and coordination"
+    },
+    "planner": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["planner", "blueprint", "strategic-compact"],
+      "description": "Plans and decomposes complex tasks",
+      "role": "Task planning and decomposition"
+    },
+    "python-dev": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["python-patterns", "python-testing", "python-reviewer"],
+      "description": "Python development, testing, and code review",
+      "role": "Python development"
+    },
+    "go-dev": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["golang-patterns", "golang-testing", "go-reviewer"],
+      "description": "Go development, testing, and code review",
+      "role": "Go development"
+    },
+    "java-dev": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["java-coding-standards", "jpa-patterns", "springboot-patterns", "springboot-security"],
+      "description": "Java/Spring development and patterns",
+      "role": "Java development"
+    },
+    "kotlin-dev": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["kotlin-coroutines-flows", "kotlin-reviewer"],
+      "description": "Kotlin development and async patterns",
+      "role": "Kotlin development"
+    },
+    "swift-dev": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["swiftui-patterns", "swift-concurrency-6-2", "swift-actor-persistence"],
+      "description": "Swift/iOS development and concurrency",
+      "role": "Swift development"
+    },
+    "django-dev": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["django-patterns", "django-security", "django-tdd", "django-verification"],
+      "description": "Django web development and security",
+      "role": "Django development"
+    },
+    "frontend-dev": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["frontend-patterns", "frontend-slides"],
+      "description": "Frontend development patterns and UI",
+      "role": "Frontend development"
+    },
+    "devops": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["docker-patterns", "deployment-patterns", "database-migrations"],
+      "description": "Infrastructure, containers, and deployment",
+      "role": "DevOps and infrastructure"
+    },
+    "security": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["security-review", "security-scan"],
+      "description": "Security audit and vulnerability review",
+      "role": "Security analysis"
+    },
+    "android-dev": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["android-clean-architecture", "compose-multiplatform-patterns"],
+      "description": "Android development with clean architecture",
+      "role": "Android development"
+    },
+    "architect": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["architect", "api-design", "backend-patterns"],
+      "description": "System architecture and API design",
+      "role": "Architecture and design"
+    },
+    "reviewer": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["code-reviewer", "refactor-cleaner"],
+      "description": "General code review and refactoring",
+      "role": "Code review"
+    },
+    "tdd-guide": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["tdd-guide", "e2e-testing"],
+      "description": "Test-driven development workflows",
+      "role": "TDD and testing"
+    },
+    "agent-ops": {
+      "model": "google/gemini-2.0-flash",
+      "skills": ["agentic-engineering", "agent-harness-construction", "continuous-learning"],
+      "description": "Building and optimizing AI agents",
+      "role": "Agent engineering"
+    }
+  },
+  "routing": {
+    "python": ["python-dev", "reviewer"],
+    "golang": ["go-dev", "reviewer"],
+    "java": ["java-dev", "reviewer"],
+    "kotlin": ["kotlin-dev", "reviewer"],
+    "swift": ["swift-dev", "reviewer"],
+    "django": ["django-dev", "security"],
+    "react": ["frontend-dev", "reviewer"],
+    "docker": ["devops"],
+    "kubernetes": ["devops"],
+    "android": ["android-dev", "reviewer"],
+    "architecture": ["architect"],
+    "security": ["security"],
+    "testing": ["tdd-guide"],
+    "agents": ["agent-ops"]
+  },
+  "notes": {
+    "model_assignment": "Using google/gemini-2.0-flash by default (free tier). Set GOOGLE_API_KEY env var or provide key in agent wizard. For local use set model to ollama/qwen3.5:0.8b.",
+    "skill_count": "133 skills available (52 original + 81 imported from everything-claude-code)",
+    "agent_count": "16 configured agents",
+    "imported_from": "https://github.com/affaan-m/everything-claude-code"
+  }
+}

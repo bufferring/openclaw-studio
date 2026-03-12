@@ -1,4 +1,4 @@
-# OS generated files
+# OS
 .DS_Store
 .DS_Store?
 ._*
@@ -7,52 +7,52 @@
 ehthumbs.db
 Thumbs.db
 
-# Editor and IDE files
+# Editors
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# Logs and temporary files
-*.log
-logs/
+# Backups & temp
+*.bak
+*.tmp
 tmp/
 temp/
 
-# Backups (as mentioned in README)
-backups/
+# Logs
+*.log
+logs/
 
-# State files
-*.state
-.setup_state
-
-# Node.js (if any local development)
+# Node.js
 node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+.pnp.*
 
-# Python (if any)
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
 *.so
 .Python
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
 
-# Build artifacts
+# Build
 dist/
 build/
 
-# Environment variables
+# Secrets / environment
 .env
 .env.local
 .env.*.local
 
-# Systemd user services (generated)
+# OpenClaw runtime artifacts (generated, never commit)
 *.service
+status.md
+agents.json
+setup.log
+workspace/
+~/.openclaw/
