@@ -5,12 +5,12 @@
 ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║
 ╚██████╔╝██║     ███████╗██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝
  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝
-          ─────────────  S T U D I O  ─────────────  v 5.2.0
+          ─────────────  S T U D I O  ─────────────  v 5.3.0
 ```
 
 > **Thin config layer for OpenClaw** — writes JSON presets, calls the CLI, and gets out of the way. Cloud models only. No local inference, no RAM bloat from this repo.
 
-![version](https://img.shields.io/badge/version-5.2.0-blue) ![openclaw](https://img.shields.io/badge/OpenClaw-2026.3.12-green) ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+![version](https://img.shields.io/badge/version-5.3.0-blue) ![openclaw](https://img.shields.io/badge/OpenClaw-2026.3.12-green) ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 
 ---
 
@@ -51,8 +51,8 @@ graph TB
     end
 
     subgraph STUDIO ["OpenClaw Studio (this repo) — zero runtime footprint"]
-        BASH["openclaw-setup.sh<br/><i>Linux/macOS/WSL</i>"]
-        PS1["openclaw-setup.ps1<br/><i>Windows PowerShell</i>"]
+        BASH["openclaw-studio.sh<br/><i>Linux/macOS/WSL</i>"]
+        PS1["openclaw-studio.ps1<br/><i>Windows PowerShell</i>"]
         POOL["agent-pool.json<br/><i>16-agent batch manifest</i>"]
     end
 
@@ -80,7 +80,7 @@ graph TB
 | **Agent Runtime** | `agent/embedded` | Receives messages from channels, constructs LLM prompt with skills/persona, calls cloud model, streams response back | Shared with gateway |
 | **Model Provider** | Cloud LLM API | Actual inference — Google, Anthropic, Groq, etc. via HTTPS | **0MB local** |
 | **Skills** | `.md` files in openclaw skills dir | Injected into agent system prompt — define capabilities and behavior patterns | Disk only |
-| **Studio Scripts** | `openclaw-setup.sh` / `.ps1` | Thin config writer — writes JSON, calls CLI, not resident | **0MB** |
+| **Studio Scripts** | `openclaw-studio.sh` / `.ps1` | Thin config writer — writes JSON, calls CLI, not resident | **0MB** |
 
 ### What Loads at Startup (all of it, always)
 
@@ -153,22 +153,22 @@ git clone https://github.com/bufferring/openclaw-studio.git
 cd openclaw-studio
 
 # Linux / macOS / WSL
-chmod +x openclaw-setup.sh
-./openclaw-setup.sh
+chmod +x openclaw-studio.sh
+./openclaw-studio.sh
 
 # Windows (PowerShell)
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-.\openclaw-setup.ps1
+.\openclaw-studio.ps1
 ```
 
 Direct CLI flags:
 
 ```bash
-./openclaw-setup.sh install    # Install OpenClaw + dependencies
-./openclaw-setup.sh agents     # Manage agents
-./openclaw-setup.sh activate   # Start gateway + show checklist
-./openclaw-setup.sh checklist  # Show live status
-./openclaw-setup.sh health     # Run health check
+./openclaw-studio.sh install    # Install OpenClaw + dependencies
+./openclaw-studio.sh agents     # Manage agents
+./openclaw-studio.sh activate   # Start gateway + show checklist
+./openclaw-studio.sh checklist  # Show live status
+./openclaw-studio.sh health     # Run health check
 ```
 
 ---
@@ -210,14 +210,13 @@ Allowed IDs    →  Telegram user IDs (comma-separated), or * for open
 | Provider | Default Model | Tier | Env Var |
 |---|---|---|---|
 | **Google** ★ | `gemini-2.0-flash` | Free tier | `GOOGLE_API_KEY` |
-| **Groq** | `llama-3.3-70b` | Free tier | `GROQ_API_KEY` |
-| **Zhipu** | `glm-4-flash` | Free tier | `ZHIPU_API_KEY` |
-| **Anthropic** | `claude-sonnet-4` | Paid | `ANTHROPIC_API_KEY` |
+| **Groq** | `llama-3.3-70b-versatile` | Free tier | `GROQ_API_KEY` |
+| **ZAI / Zhipu** | `glm-4.7-flash` | Free tier | `ZAI_API_KEY` |
+| **Anthropic** | `claude-sonnet-4-6` | Paid | `ANTHROPIC_API_KEY` |
 | **OpenAI** | `gpt-4o` | Paid | `OPENAI_API_KEY` |
 | **OpenRouter** | `anthropic/claude-sonnet-4` | Multi | `OPENROUTER_API_KEY` |
-| **DeepSeek** | `deepseek-chat` | Low cost | `DEEPSEEK_API_KEY` |
 
-★ Recommended default — free tier, fast, zero local RAM.
+★ Recommended default — free tier, fast, zero local RAM. DeepSeek available via `openrouter/deepseek/`.
 
 ---
 
@@ -252,8 +251,8 @@ All default to `google/gemini-2.0-flash`. Override per-agent in the JSON.
 
 ```
 openclaw-studio/                          # THIS REPO — setup scripts only
-├── openclaw-setup.sh                     # Linux / macOS / WSL setup (bash)
-├── openclaw-setup.ps1                    # Windows PowerShell setup
+├── openclaw-studio.sh                    # Linux / macOS / WSL setup (bash)
+├── openclaw-studio.ps1                   # Windows PowerShell setup
 ├── agent-pool.json                       # 16-agent batch deployment manifest
 ├── agents/                               # Agent persona definitions (.md)
 │   ├── orchestrator.md
@@ -294,7 +293,7 @@ openclaw-studio/                          # THIS REPO — setup scripts only
 ## Telegram Setup
 
 1. Create a bot via [@BotFather](https://t.me/BotFather) → copy the token
-2. Get your Telegram user ID: `./openclaw-setup.sh` → option **8**, or message [@userinfobot](https://t.me/userinfobot)
+2. Get your Telegram user ID: `./openclaw-studio.sh` → option **8**, or message [@userinfobot](https://t.me/userinfobot)
 3. Add both when prompted during agent creation (option 3)
 
 The script runs:
@@ -381,6 +380,23 @@ systemctl --user restart openclaw-gateway.service
 ---
 
 ## Changelog
+
+### v5.3.0
+- **Renamed:** Scripts `openclaw-setup.*` → `openclaw-studio.*`
+- **Fixed:** ALL provider model IDs verified against OpenClaw 2026.3.12 catalog
+- **Fixed:** Provider `zhipu` → `zai` (matches OpenClaw's actual provider name)
+- **Fixed:** Groq models need full suffixes (`llama-3.3-70b-versatile`, not `llama-3.3-70b`)
+- **Fixed:** Anthropic models need version suffixes (`claude-sonnet-4-6`, not `claude-sonnet-4`)
+- **Fixed:** OpenAI models updated (`gpt-4.1` replaces deprecated `gpt-3.5-turbo`)
+- **Removed:** DeepSeek as direct provider (not in OpenClaw catalog — use `openrouter/deepseek/`)
+- **Fixed:** Group chat enabled by default — `groupPolicy` + `groupAllowFrom` set alongside `dmPolicy`
+- **Added:** Group policy option in edit agent menu
+- **Improved:** Skills import validates discovery after copy
+- **Fixed:** `gateway.mode=local` seeded on fresh install (prevents crash-loop)
+- **Fixed:** List/edit/delete agents use OpenClaw CLI as primary source (not just local `agents.json`)
+- **Fixed:** Doctor warnings no longer break agent listing
+- **Removed:** `bun` from health check (dropped in v5.1.0)
+- **Cleanup:** Removed dead code (`spinner`, stale comments, redundant vars)
 
 ### v5.2.0
 - **Breaking:** Dropped local model (Ollama) support entirely — **cloud providers only**

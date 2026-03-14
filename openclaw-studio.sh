@@ -1,25 +1,20 @@
 #!/usr/bin/env bash
 #
 # OpenClaw Studio - Multi-Agent Orchestration Platform
-# Version: 5.2.0
+# Version: 5.3.0
 #
-# v5.2.0 — Cloud-only, thin config layer:
-#   - BREAKING: Dropped local model (Ollama) support entirely — cloud providers only
-#   - Removed: install_ollama, ensure_ollama_running, recommend_context_window, write_models_json
-#   - Default provider: google/gemini-2.0-flash (free tier)
-#   - Studio is a thin config writer: writes openclaw.json presets, calls CLI, done
-#   - Gateway ~800MB is OpenClaw's baseline — not something Studio can reduce
+# v5.3.0 — Provider audit, group chat, cleanup:
+#   - Renamed scripts: openclaw-setup.* → openclaw-studio.*
+#   - Fixed ALL provider model IDs (verified against OpenClaw 2026.3.12 catalog)
+#   - Renamed provider zhipu → zai; removed deepseek (use openrouter/deepseek/)
+#   - Group chat enabled by default (groupPolicy + groupAllowFrom set automatically)
+#   - edit/delete/list agents now use OpenClaw CLI as primary source
+#   - Removed dead code: spinner, bun check, stale comments, redundant vars
+#   - Skills import validates discovery; removed stale agents/*.md copy
 #
-# v5.1.0:
-#   - Node 24 + npm (dropped bun), IPv6 fix, skills auto-import
-#   - auth-profiles.json merge, context window sizing
-#
-# v5.0.0 (verified against OpenClaw 2026.3.8):
-#   - Telegram plugin enabled before channel add
-#   - allowFrom set via 'openclaw config set'
-#   - API keys in auth-profiles.json
-#   - Gateway persistence via 'openclaw gateway install'
-#   - Model defaults: gemini-2.0-flash (google)
+# v5.2.0 — Cloud-only, thin config layer
+# v5.1.0 — Node 24 + npm, IPv6 fix, skills auto-import
+# v5.0.0 — Telegram plugin, allowFrom, auth-profiles, gateway persistence
 #
 # Works on: Linux, macOS, Windows WSL
 #
@@ -28,7 +23,7 @@
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-VERSION="5.2.0"
+VERSION="5.3.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${HOME}/.openclaw"
 WORKSPACE_DIR="${HOME}/.openclaw/workspace"
@@ -56,34 +51,30 @@ WHITE='\033[1;37m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
-
 declare -A PROVIDERS=(
     ["google"]="Google Gemini (Free tier)"
     ["groq"]="Groq (Free tier)"
-    ["zhipu"]="Zhipu GLM (Free tier)"
+    ["zai"]="ZAI / Zhipu (Free tier)"
     ["anthropic"]="Anthropic Claude (Paid)"
     ["openai"]="OpenAI GPT (Paid)"
     ["openrouter"]="OpenRouter (Multi-provider)"
-    ["deepseek"]="DeepSeek (Low cost)"
 )
 
-declare -A PROVIDER_FREE=(["google"]=1 ["zhipu"]=1 ["groq"]=1)
+declare -A PROVIDER_FREE=(["google"]=1 ["zai"]=1 ["groq"]=1)
 
 declare -A PROVIDER_MODELS=(
     ["google"]="gemini-2.0-flash|gemini-1.5-pro|gemini-2.5-flash|gemini-1.5-flash"
-    ["groq"]="llama-3.3-70b|llama-3.1-8b|mixtral-8x7b"
-    ["zhipu"]="glm-4-flash|glm-4|glm-4-plus"
-    ["anthropic"]="claude-sonnet-4|claude-opus-4|claude-3.5-sonnet"
-    ["openai"]="gpt-4o|gpt-4-turbo|gpt-3.5-turbo"
-    ["openrouter"]="anthropic/claude-sonnet-4|openai/gpt-4o|meta-llama/llama-3.1-70b"
-    ["deepseek"]="deepseek-chat|deepseek-coder"
+    ["groq"]="llama-3.3-70b-versatile|llama-3.1-8b-instant|gemma2-9b-it"
+    ["zai"]="glm-4.7-flash|glm-4.7|glm-5|glm-4.5-flash"
+    ["anthropic"]="claude-sonnet-4-6|claude-opus-4-6|claude-3-5-sonnet-20241022"
+    ["openai"]="gpt-4o|gpt-4.1|gpt-4.1-mini"
+    ["openrouter"]="anthropic/claude-sonnet-4|openai/gpt-4o|meta-llama/llama-3.3-70b-instruct"
 )
 
 # Auth profile provider IDs (for auth-profiles.json)
 declare -A PROVIDER_AUTH_ID=(
     ["google"]="google" ["anthropic"]="anthropic" ["openai"]="openai"
-    ["groq"]="groq" ["openrouter"]="openrouter" ["deepseek"]="deepseek" ["zhipu"]="zai"
+    ["groq"]="groq" ["openrouter"]="openrouter" ["zai"]="zai"
 )
 
 # =============================================================================
@@ -112,16 +103,6 @@ EOF
     echo -e "${WHITE}         ─────────────  S T U D I O  ─────────────  v${VERSION}${NC}"
     echo -e "${YELLOW}            Multi-Agent Orchestration Platform${NC}"
     echo ""
-}
-
-spinner() {
-    local pid=$1 message=$2 i=0
-    while kill -0 "$pid" 2>/dev/null; do
-        printf "\r${CYAN}${SPINNER_FRAMES[$((i % 10))]}${NC} ${message}"
-        i=$((i + 1))
-        sleep 0.1
-    done
-    printf "\r"
 }
 
 print_header() {
@@ -281,7 +262,7 @@ install_openclaw() {
 }
 
 # =============================================================================
-# OPENCLAW PREREQUISITES  (NEW — required before agents/gateway work)
+# OPENCLAW PREREQUISITES
 # =============================================================================
 
 ensure_openclaw_prerequisites() {
@@ -404,8 +385,12 @@ import_skills() {
     after=$(ls -1 "$openclaw_skills" 2>/dev/null | wc -l)
     print_success "$((after - before)) new skills imported ($after total) → $openclaw_skills"
 
-    mkdir -p "$AGENTS_DIR"
-    cp "$tmp_dir/agents/"*.md "$AGENTS_DIR/" 2>/dev/null && print_success "Agent definitions copied"
+    # Verify OpenClaw discovers the imported skills
+    if check_command openclaw; then
+        local discovered
+        discovered=$(openclaw skills list 2>&1 | grep -cE "ready|missing" || echo 0)
+        print_info "OpenClaw sees $discovered skills (use 'openclaw skills list' for details)"
+    fi
 }
 
 list_skills() {
@@ -418,7 +403,7 @@ list_skills() {
 }
 
 # =============================================================================
-# NATIVE CLI INTEGRATION LAYER  (corrected for OpenClaw 2026.3.8)
+# NATIVE CLI INTEGRATION LAYER
 # =============================================================================
 
 # Create agent via native CLI with optional Telegram binding
@@ -509,6 +494,16 @@ configure_telegram_allowlist() {
     else
         print_warning "Could not set dmPolicy for '$account_id'"
     fi
+
+    # Mirror the same policy to group chat so agents work in groups by default
+    openclaw config set "channels.telegram.accounts.${account_id}.groupAllowFrom" \
+        "$allow_json" --strict-json 2>/dev/null || true
+    if openclaw config set "channels.telegram.accounts.${account_id}.groupPolicy" \
+        "$dm_policy" 2>/dev/null; then
+        print_success "Telegram group policy: $dm_policy"
+    else
+        print_warning "Could not set groupPolicy for '$account_id'"
+    fi
 }
 
 # Set agent display identity
@@ -556,7 +551,6 @@ except: print('{}')
     # Build new profile entry
     local auth_provider="${PROVIDER_AUTH_ID[$provider]:-$provider}"
     local profile_id="${auth_provider}:manual"
-    local profile_key="${api_key}"
 
     debug "write_auth_profiles: agent=$agent_id profile=$profile_id file=$auth_file"
 
@@ -567,7 +561,7 @@ import sys,json
 profiles=json.loads(sys.argv[1])
 profiles[sys.argv[2]]={'type':'api_key','provider':sys.argv[3],'key':sys.argv[4]}
 print(json.dumps(profiles,indent=2))
-" "$existing_profiles" "$profile_id" "${provider}" "$profile_key" 2>/dev/null)
+" "$existing_profiles" "$profile_id" "${provider}" "$api_key" 2>/dev/null)
 
     if [[ -z "$merged" ]]; then
         print_error "Failed to merge auth profiles for agent '$agent_id'"
@@ -580,7 +574,7 @@ print(json.dumps(profiles,indent=2))
 }
 
 # =============================================================================
-# INTERACTIVE AGENT WIZARD  (corrected full workflow)
+# INTERACTIVE AGENT WIZARD
 # =============================================================================
 
 create_agent_interactive() {
@@ -613,7 +607,7 @@ create_agent_interactive() {
     # --- Model Provider ---
     echo ""
     print_step "Select model provider:"
-    local provider_order=(google groq zhipu anthropic openai openrouter deepseek)
+    local provider_order=(google groq zai anthropic openai openrouter)
     local i=1
     for p in "${provider_order[@]}"; do
         local badge=""
@@ -623,16 +617,15 @@ create_agent_interactive() {
         ((i++))
     done
     echo ""
-    read -rp "$(echo -e "${CYAN}Select provider${NC} [1-7, default=1 Google]: ")" provider_choice
+    read -rp "$(echo -e "${CYAN}Select provider${NC} [1-6, default=1 Google]: ")" provider_choice
     [[ -z "$provider_choice" ]] && provider_choice=1
     case $provider_choice in
         1) provider="google" ;;
         2) provider="groq" ;;
-        3) provider="zhipu" ;;
+        3) provider="zai" ;;
         4) provider="anthropic" ;;
         5) provider="openai" ;;
         6) provider="openrouter" ;;
-        7) provider="deepseek" ;;
         *) provider="google" ;;
     esac
 
@@ -1046,6 +1039,8 @@ edit_agent() {
             | grep -v "^🦞" | grep -v "^$" | head -1 | tr -d '"' || echo "")
         cur_allow=$(openclaw config get "channels.telegram.accounts.${agent_id}.allowFrom" 2>/dev/null \
             | grep -v "^🦞" | python3 -c "import sys,json; v=json.load(sys.stdin); print(','.join(str(x) for x in v))" 2>/dev/null || echo "")
+        cur_group_policy=$(openclaw config get "channels.telegram.accounts.${agent_id}.groupPolicy" 2>/dev/null \
+            | grep -v "^🦞" | grep -v "^$" | head -1 | tr -d '"' || echo "not set")
 
         echo ""
         print_info "Editing: $agent_id  (Enter = keep current)"
@@ -1054,6 +1049,7 @@ edit_agent() {
         echo -e "  ${CYAN}2.${NC} Change name    [$cur_name]"
         echo -e "  ${CYAN}3.${NC} Change bot token"
         echo -e "  ${CYAN}4.${NC} Change allowed IDs  [$cur_allow]"
+        echo -e "  ${CYAN}5.${NC} Change group policy  [$cur_group_policy]"
         echo -e "  ${MAGENTA}0.${NC} Cancel"
         echo ""
         read -rp "$(echo -e "${CYAN}What to edit${NC}: ")" edit_choice
@@ -1094,6 +1090,22 @@ edit_agent() {
                 read -rp "$(echo -e "${CYAN}Allowed Telegram IDs${NC} (comma-separated, * for open) [$cur_allow]: ")" new_allow
                 [[ -n "$new_allow" ]] && configure_telegram_allowlist "$agent_id" "$new_allow"
                 ;;
+            5)
+                echo ""
+                echo -e "  1) open       — anyone in the group"
+                echo -e "  2) allowlist  — only allowed IDs"
+                echo -e "  3) off        — ignore group messages"
+                read -rp "$(echo -e "${CYAN}Group policy${NC} [1-3]: ")" gp_choice
+                case $gp_choice in
+                    1) openclaw config set "channels.telegram.accounts.${agent_id}.groupPolicy" "open" 2>/dev/null \
+                        && print_success "Group policy: open" ;;
+                    2) openclaw config set "channels.telegram.accounts.${agent_id}.groupPolicy" "allowlist" 2>/dev/null \
+                        && print_success "Group policy: allowlist" ;;
+                    3) openclaw config set "channels.telegram.accounts.${agent_id}.groupPolicy" "off" 2>/dev/null \
+                        && print_success "Group policy: off" ;;
+                    *) print_info "Group policy unchanged" ;;
+                esac
+                ;;
             0) return ;;
         esac
 
@@ -1105,16 +1117,19 @@ delete_agent() {
     print_header "Delete Agent"
     require_jq || return 1
 
-    [[ ! -f "$AGENTS_CONFIG" ]] && { print_warning "No agents configured"; return; }
+    # Primary: OpenClaw CLI; fallback: local agents.json
     local agents=()
-    mapfile -t agents < <(jq -r '.agents | keys[]' "$AGENTS_CONFIG" 2>/dev/null)
+    if check_command openclaw; then
+        mapfile -t agents < <(openclaw agents list --json 2>&1 | jq -r '.[].id' 2>/dev/null)
+    fi
+    if [[ ${#agents[@]} -eq 0 && -f "$AGENTS_CONFIG" ]]; then
+        mapfile -t agents < <(jq -r '.agents | keys[]' "$AGENTS_CONFIG" 2>/dev/null)
+    fi
     [[ ${#agents[@]} -eq 0 ]] && { print_warning "No agents configured"; return; }
 
     echo ""
     for i in "${!agents[@]}"; do
-        local name
-        name=$(jq -r ".agents[\"${agents[$i]}\"].name // \"${agents[$i]}\"" "$AGENTS_CONFIG")
-        printf "  %d) %s: %s\n" "$((i+1))" "${agents[$i]}" "$name"
+        printf "  %d) %s\n" "$((i+1))" "${agents[$i]}"
     done
     echo ""
     read -rp "$(echo -e "${CYAN}Select agent to delete${NC}: ")" choice
@@ -1123,18 +1138,19 @@ delete_agent() {
     if [[ $idx -ge 0 && $idx -lt ${#agents[@]} ]]; then
         local agent_id="${agents[$idx]}"
         if confirm "Delete agent '$agent_id'? This removes it from OpenClaw too." "n"; then
-            # Remove from OpenClaw
             openclaw agents delete "$agent_id" 2>/dev/null && print_success "Removed from OpenClaw" || print_warning "Could not remove from OpenClaw CLI"
-            # Remove from tracking
-            local tmp; tmp=$(mktemp)
-            jq "del(.agents[\"$agent_id\"])" "$AGENTS_CONFIG" > "$tmp" && mv "$tmp" "$AGENTS_CONFIG"
+            # Also remove from local tracking if present
+            if [[ -f "$AGENTS_CONFIG" ]]; then
+                local tmp; tmp=$(mktemp)
+                jq "del(.agents[\"$agent_id\"])" "$AGENTS_CONFIG" > "$tmp" && mv "$tmp" "$AGENTS_CONFIG"
+            fi
             print_success "Agent '$agent_id' deleted"
         fi
     fi
 }
 
 # =============================================================================
-# GATEWAY MANAGEMENT  (corrected: uses openclaw gateway install/start)
+# GATEWAY MANAGEMENT
 # =============================================================================
 
 is_port_in_use() {
@@ -1207,7 +1223,7 @@ activate_agents() {
 }
 
 # =============================================================================
-# FINAL CHECKLIST  (NEW — live status of all components)
+# FINAL CHECKLIST
 # =============================================================================
 
 show_checklist() {
@@ -1233,9 +1249,13 @@ show_checklist() {
     echo ""
     print_info "── Gateway ──"
 
-    local gw_health
-    gw_health=$(openclaw health 2>/dev/null | head -3 || echo "unreachable")
-    if echo "$gw_health" | grep -qi "ok"; then
+    local gw_running=0
+    if openclaw health 2>/dev/null | grep -qi "ok"; then
+        gw_running=1
+    elif is_port_in_use 18789; then
+        gw_running=1
+    fi
+    if [[ $gw_running -eq 1 ]]; then
         printf "  ${GREEN}✓${NC} Gateway: running (port 18789)\n"
         ((passed++))
     else
@@ -1261,7 +1281,7 @@ show_checklist() {
     print_info "── Agents ──"
 
     local agent_list
-    agent_list=$(openclaw agents list --json 2>/dev/null || echo '[]')
+    agent_list=$(openclaw agents list --json 2>&1) || true
     local agent_count
     agent_count=$(echo "$agent_list" | jq 'length' 2>/dev/null || echo 0)
 
@@ -1445,10 +1465,6 @@ health_check() {
         fi
     done
 
-    check_command bun \
-        && { print_success "bun: $(bun -v 2>/dev/null)"; ((passed++)); } \
-        || { print_warning "bun: not installed (optional)"; ((warnings++)); }
-
     echo ""
     print_info "Checking OpenClaw..."
     if check_command openclaw; then
@@ -1461,8 +1477,14 @@ health_check() {
 
     echo ""
     print_info "Checking gateway..."
+    local gw_running=0
     if openclaw health 2>/dev/null | grep -qi "ok"; then
-        print_success "Gateway: running"
+        gw_running=1
+    elif is_port_in_use 18789; then
+        gw_running=1
+    fi
+    if [[ $gw_running -eq 1 ]]; then
+        print_success "Gateway: running (port 18789)"
         ((passed++))
     else
         print_warning "Gateway: not running (run option 7 to start)"

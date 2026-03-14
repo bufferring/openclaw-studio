@@ -117,7 +117,7 @@
     "agents": ["agent-ops"]
   },
   "notes": {
-    "model_assignment": "Using google/gemini-2.0-flash by default (free tier). Set GOOGLE_API_KEY env var or provide key in agent wizard. For local use set model to ollama/qwen3.5:0.8b.",
+    "model_assignment": "Using google/gemini-2.0-flash by default (free tier). Set GOOGLE_API_KEY env var or provide key in agent wizard.",
     "skill_count": "133 skills available (52 original + 81 imported from everything-claude-code)",
     "agent_count": "16 configured agents",
     "imported_from": "https://github.com/affaan-m/everything-claude-code"

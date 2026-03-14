@@ -1,22 +1,20 @@
 <#
 .SYNOPSIS
-    OpenClaw Studio - Multi-Agent Orchestration Platform v5.2.0
+    OpenClaw Studio - Multi-Agent Orchestration Platform v5.3.0
 
 .DESCRIPTION
-    v5.2.0 - Cloud-only, thin config layer:
-      - BREAKING: Dropped local model (Ollama) support entirely - cloud providers only
-      - Removed: Install-Ollama, Ensure-OllamaRunning, Get-RecommendedContextWindow, Write-ModelsJson
-      - Default provider: google/gemini-2.0-flash (free tier)
-      - Studio is a thin config writer: writes openclaw.json presets, calls CLI, done
-      - Gateway ~800MB is OpenClaw's baseline - not something Studio can reduce
+    v5.3.0 - Provider audit, group chat, cleanup:
+      - Renamed scripts: openclaw-setup.* -> openclaw-studio.*
+      - Fixed ALL provider model IDs (verified against OpenClaw 2026.3.12 catalog)
+      - Renamed provider zhipu -> zai; removed deepseek (use openrouter/deepseek/)
+      - Group chat enabled by default (groupPolicy + groupAllowFrom set automatically)
+      - edit/delete/list agents now use OpenClaw CLI as primary source
+      - Removed dead code and stale comments
+      - Skills import validates discovery
 
-    v5.1.0:
-      - Node 24 + npm (dropped bun), IPv6 fix, skills auto-import
-      - auth-profiles.json merge, context window sizing
-
-    v5.0.0 (verified against OpenClaw 2026.3.8):
-      - Telegram plugin, allowFrom, auth-profiles, gateway persistence
-      - Fixed Write-Host precedence, Get-CimInstance, $PSScriptRoot
+    v5.2.0 - Cloud-only, thin config layer
+    v5.1.0 - Node 24 + npm, IPv6 fix, skills auto-import
+    v5.0.0 - Telegram plugin, allowFrom, auth-profiles, gateway persistence
 
 .PARAMETER Action
     install | skills | agents | health | backup | restore | activate | checklist | prereqs
@@ -41,7 +39,7 @@ if ($Debug) { $DebugPreference = "Continue" }
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-$VERSION     = "5.2.0"
+$VERSION     = "5.3.0"
 $SCRIPT_DIR  = $PSScriptRoot
 $CONFIG_DIR  = Join-Path $env:USERPROFILE ".openclaw"
 $WORKSPACE_DIR = Join-Path $CONFIG_DIR "workspace"
@@ -53,28 +51,26 @@ $AGENTS_CONFIG = Join-Path $CONFIG_DIR "agents.json"
 $PROVIDERS = [ordered]@{
     "google"     = "Google Gemini (Free tier)"
     "groq"       = "Groq (Free tier)"
-    "zhipu"      = "Zhipu GLM (Free tier)"
+    "zai"        = "ZAI / Zhipu (Free tier)"
     "anthropic"  = "Anthropic Claude (Paid)"
     "openai"     = "OpenAI GPT (Paid)"
     "openrouter" = "OpenRouter (Multi-provider)"
-    "deepseek"   = "DeepSeek (Low cost)"
 }
 
-$PROVIDER_FREE = @("google","zhipu","groq")
+$PROVIDER_FREE = @("google","zai","groq")
 
 $PROVIDER_MODELS = @{
     "google"     = @("gemini-2.0-flash","gemini-1.5-pro","gemini-2.5-flash","gemini-1.5-flash")
-    "groq"       = @("llama-3.3-70b","llama-3.1-8b","mixtral-8x7b")
-    "zhipu"      = @("glm-4-flash","glm-4","glm-4-plus")
-    "anthropic"  = @("claude-sonnet-4","claude-opus-4","claude-3.5-sonnet")
-    "openai"     = @("gpt-4o","gpt-4-turbo","gpt-3.5-turbo")
-    "openrouter" = @("anthropic/claude-sonnet-4","openai/gpt-4o","meta-llama/llama-3.1-70b")
-    "deepseek"   = @("deepseek-chat","deepseek-coder")
+    "groq"       = @("llama-3.3-70b-versatile","llama-3.1-8b-instant","gemma2-9b-it")
+    "zai"        = @("glm-4.7-flash","glm-4.7","glm-5","glm-4.5-flash")
+    "anthropic"  = @("claude-sonnet-4-6","claude-opus-4-6","claude-3-5-sonnet-20241022")
+    "openai"     = @("gpt-4o","gpt-4.1","gpt-4.1-mini")
+    "openrouter" = @("anthropic/claude-sonnet-4","openai/gpt-4o","meta-llama/llama-3.3-70b-instruct")
 }
 
 $PROVIDER_AUTH_ID = @{
     "google"="google"; "anthropic"="anthropic"; "openai"="openai"
-    "groq"="groq"; "openrouter"="openrouter"; "deepseek"="deepseek"; "zhipu"="zai"
+    "groq"="groq"; "openrouter"="openrouter"; "zai"="zai"
 }
 
 # =============================================================================
@@ -338,11 +334,10 @@ function Import-Skills {
     $after = (Get-ChildItem $openclawSkills -Directory -ErrorAction SilentlyContinue | Measure-Object).Count
     Write-Success "$($after - $before) new skills imported ($after total) → $openclawSkills"
 
-    $agentsSrc = Join-Path $tmpDir "agents"
-    if (Test-Path $agentsSrc) {
-        New-Item -ItemType Directory -Force -Path $AGENTS_DIR | Out-Null
-        Copy-Item "$agentsSrc\*.md" $AGENTS_DIR -Force 2>$null
-        Write-Success "Agent definitions copied to $AGENTS_DIR"
+    # Verify OpenClaw discovers the imported skills
+    if (Test-Command "openclaw") {
+        $discovered = (openclaw skills list 2>&1 | Select-String -Pattern "ready|missing" | Measure-Object).Count
+        Write-Info "OpenClaw sees $discovered skills (use 'openclaw skills list' for details)"
     }
 }
 
@@ -356,7 +351,7 @@ function Get-Skills {
 }
 
 # =============================================================================
-# NATIVE CLI INTEGRATION LAYER  (corrected for OpenClaw 2026.3.8)
+# NATIVE CLI INTEGRATION LAYER
 # =============================================================================
 
 function Add-TelegramChannel {
@@ -392,6 +387,15 @@ function Set-TelegramAllowlist {
     } else {
         Write-Warn "Could not fully set Telegram allowlist for '$AccountId'"
         Write-Debug-Info "Output: $r"
+    }
+
+    # Mirror the same policy to group chat so agents work in groups by default
+    openclaw config set "channels.telegram.accounts.$AccountId.groupAllowFrom" $allowJson --strict-json 2>$null | Out-Null
+    $gr = openclaw config set "channels.telegram.accounts.$AccountId.groupPolicy" $dmPolicy 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Telegram group policy: $dmPolicy"
+    } else {
+        Write-Warn "Could not set groupPolicy for '$AccountId'"
     }
 }
 
@@ -503,14 +507,14 @@ function New-AgentInteractive {
     # --- Model Provider ---
     Write-Host ""
     Write-Step "Select model provider:"
-    $providerList = @("google","groq","zhipu","anthropic","openai","openrouter","deepseek")
+    $providerList = @("google","groq","zai","anthropic","openai","openrouter")
     for ($i = 0; $i -lt $providerList.Count; $i++) {
         $p = $providerList[$i]
         $badge = if ($PROVIDER_FREE -contains $p) { "[FREE] " } else { "[PAID] " }
         Write-Host ("  {0}) {1}{2}" -f ($i+1), $badge, $PROVIDERS[$p])
     }
     Write-Host ""
-    $providerChoice = Read-Host "Select provider [1-7, default=1 Google]"
+    $providerChoice = Read-Host "Select provider [1-6, default=1 Google]"
     if ([string]::IsNullOrWhiteSpace($providerChoice)) { $providerChoice = "1" }
     $pIdx = [int]$providerChoice - 1
     if ($pIdx -lt 0 -or $pIdx -ge $providerList.Count) { $pIdx = 0 }
@@ -790,7 +794,13 @@ function Get-Agents {
 
     if (Test-Command "openclaw") {
         Write-Info "From OpenClaw CLI:"
-        openclaw agents list --bindings 2>$null
+        $cliOut = openclaw agents list --bindings 2>&1 | Out-String
+        if ($cliOut) {
+            # Strip doctor warning box lines for cleaner output
+            $cliOut -split "`n" | Where-Object { $_ -notmatch '^\s*[│├╮╯◇]|Doctor warnings|^\s*$|🦞' } | ForEach-Object { Write-Host $_ }
+        } else {
+            Write-Warn "Could not query OpenClaw agent list"
+        }
         Write-Host ""
     }
 
@@ -811,48 +821,97 @@ function Get-Agents {
 
 function Edit-Agent {
     Write-Header "Edit Agent"
-    if (-not (Require-Jq)) { return }
-    if (-not (Test-Path $AGENTS_CONFIG)) { Write-Warn "No agents configured"; return }
 
-    $cfg    = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
-    $agents = $cfg.agents.PSObject.Properties.Name
+    # Primary: OpenClaw CLI; fallback: local agents.json
+    $agents = @()
+    if (Test-Command "openclaw") {
+        $cliJson = openclaw agents list --json 2>&1 | Out-String
+        try { $agents = ($cliJson | ConvertFrom-Json) | ForEach-Object { $_.id } } catch {}
+    }
+    if ($agents.Count -eq 0 -and (Test-Path $AGENTS_CONFIG)) {
+        try { $agents = (Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json).agents.PSObject.Properties.Name } catch {}
+    }
     if ($agents.Count -eq 0) { Write-Warn "No agents configured"; return }
 
     for ($i = 0; $i -lt $agents.Count; $i++) {
-        Write-Host ("  {0}) {1}: {2}" -f ($i+1), $agents[$i], ($cfg.agents.($agents[$i]).name ?? $agents[$i]))
+        Write-Host ("  {0}) {1}" -f ($i+1), $agents[$i])
     }
     Write-Host ""
     $choice = [int](Read-Host "Select agent to edit") - 1
     if ($choice -lt 0 -or $choice -ge $agents.Count) { Write-Err "Invalid selection"; return }
 
-    $agentId  = $agents[$choice]
-    $a        = $cfg.agents.$agentId
-    $newName  = Read-Host "Name [$($a.name)] (Enter to keep)"
-    $newModel = Read-Host "Model [$($a.model)] (Enter to keep)"
-    $newBot   = Read-Host "Bot Token [$(if($a.bot_token){'configured'}else{'none'})] (Enter to keep)"
-    $newAllow = Read-Host "Allowed IDs [$($a.allow_from -join ', ')] (Enter to keep)"
+    $agentId = $agents[$choice]
 
-    if ($newName)  { $a.name       = $newName  }
-    if ($newModel) {
-        $a.model = $newModel
-        $newProvider = ($newModel -split "/")[0]
-        $newKey = Read-Host "API key for $newProvider (Enter to skip)"
-        Write-AuthProfiles -AgentId $agentId -Provider $newProvider -ApiKey $newKey
+    # Fetch current values from CLI
+    $curModel = (openclaw config get "agents" 2>$null | Out-String) -replace '.*',''
+    $curGroupPolicy = try { (openclaw config get "channels.telegram.accounts.$agentId.groupPolicy" 2>$null).Trim().Trim('"') } catch { "not set" }
+
+    Write-Host ""
+    Write-Info "Editing: $agentId  (Enter = keep current)"
+    Write-Host ""
+    Write-Host "  1. Change model"
+    Write-Host "  2. Change name"
+    Write-Host "  3. Change bot token"
+    Write-Host "  4. Change allowed IDs"
+    Write-Host "  5. Change group policy [$curGroupPolicy]"
+    Write-Host "  0. Cancel"
+    Write-Host ""
+    $editChoice = Read-Host "What to edit"
+
+    switch ($editChoice) {
+        "1" {
+            $newModel = Read-Host "New model (e.g. google/gemini-2.0-flash)"
+            if ($newModel) {
+                $newProvider = ($newModel -split "/")[0]
+                $newKey = Read-Host "API key for $newProvider (Enter to skip)"
+                Write-AuthProfiles -AgentId $agentId -Provider $newProvider -ApiKey $newKey
+            }
+        }
+        "2" {
+            $newName = Read-Host "New name"
+            if ($newName) {
+                openclaw agents set-identity --agent $agentId --name $newName 2>$null | Out-Null
+                if ($LASTEXITCODE -eq 0) { Write-Success "Name updated to '$newName'" }
+            }
+        }
+        "3" {
+            $newBot = Read-Host "New bot token"
+            if ($newBot) { Add-TelegramChannel -AccountId $agentId -BotToken $newBot }
+        }
+        "4" {
+            $newAllow = Read-Host "Allowed Telegram IDs (comma-separated, * for open)"
+            if ($newAllow) { Set-TelegramAllowlist -AccountId $agentId -AllowIds $newAllow }
+        }
+        "5" {
+            Write-Host ""
+            Write-Host "  1) open       - anyone in the group"
+            Write-Host "  2) allowlist  - only allowed IDs"
+            Write-Host "  3) off        - ignore group messages"
+            $gpChoice = Read-Host "Group policy [1-3]"
+            $gpVal = switch ($gpChoice) { "1" { "open" } "2" { "allowlist" } "3" { "off" } default { "" } }
+            if ($gpVal) {
+                openclaw config set "channels.telegram.accounts.$agentId.groupPolicy" $gpVal 2>$null | Out-Null
+                Write-Success "Group policy: $gpVal"
+            }
+        }
+        "0" { return }
     }
-    if ($newBot)   { $a.bot_token  = $newBot; Add-TelegramChannel -AccountId $agentId -BotToken $newBot -DisplayName ($newName ?? $a.name) }
-    if ($newAllow) { $a.allow_from = @($newAllow); Set-TelegramAllowlist -AccountId $agentId -AllowIds $newAllow }
 
-    $cfg | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
     Write-Success "Agent '$agentId' updated"
 }
 
 function Remove-Agent {
     Write-Header "Delete Agent"
-    if (-not (Require-Jq)) { return }
-    if (-not (Test-Path $AGENTS_CONFIG)) { Write-Warn "No agents configured"; return }
 
-    $cfg    = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
-    $agents = $cfg.agents.PSObject.Properties.Name
+    # Primary: OpenClaw CLI; fallback: local agents.json
+    $agents = @()
+    if (Test-Command "openclaw") {
+        $cliJson = openclaw agents list --json 2>&1 | Out-String
+        try { $agents = ($cliJson | ConvertFrom-Json) | ForEach-Object { $_.id } } catch {}
+    }
+    if ($agents.Count -eq 0 -and (Test-Path $AGENTS_CONFIG)) {
+        try { $agents = (Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json).agents.PSObject.Properties.Name } catch {}
+    }
     if ($agents.Count -eq 0) { Write-Warn "No agents configured"; return }
 
     for ($i = 0; $i -lt $agents.Count; $i++) {
@@ -864,14 +923,20 @@ function Remove-Agent {
     $agentId = $agents[$choice]
     if (Confirm-Action "Delete '$agentId'? Removes from OpenClaw too." "n") {
         openclaw agents delete $agentId 2>$null | Out-Null
-        $cfg.agents.PSObject.Properties.Remove($agentId)
-        $cfg | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
+        # Also remove from local tracking if present
+        if (Test-Path $AGENTS_CONFIG) {
+            try {
+                $cfg = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+                $cfg.agents.PSObject.Properties.Remove($agentId)
+                $cfg | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
+            } catch {}
+        }
         Write-Success "Agent '$agentId' deleted"
     }
 }
 
 # =============================================================================
-# GATEWAY MANAGEMENT  (corrected: openclaw gateway install/start)
+# GATEWAY MANAGEMENT
 # =============================================================================
 
 function Test-PortInUse {
@@ -934,7 +999,7 @@ function Start-Gateway {
 }
 
 # =============================================================================
-# FINAL CHECKLIST  (NEW — live status of all components)
+# FINAL CHECKLIST
 # =============================================================================
 
 function Show-Checklist {
@@ -953,8 +1018,11 @@ function Show-Checklist {
 
     Write-Host ""
     Write-Info "── Gateway ──"
+    $gwRunning = $false
     $health = openclaw health 2>$null
-    if ($health -match "OK") {
+    if ($health -match "OK") { $gwRunning = $true }
+    elseif (Test-PortInUse -Port 18789) { $gwRunning = $true }
+    if ($gwRunning) {
         Write-Host "  ✓ Gateway: running (port 18789)" -ForegroundColor Green
     } else {
         Write-Host "  ✗ Gateway: not responding" -ForegroundColor Red
@@ -971,7 +1039,7 @@ function Show-Checklist {
 
     Write-Host ""
     Write-Info "── Agents ──"
-    $agentJson = openclaw agents list --json 2>$null
+    $agentJson = openclaw agents list --json 2>&1 | Out-String
     if ($agentJson) {
         try {
             $agList = $agentJson | ConvertFrom-Json
@@ -1132,9 +1200,12 @@ function Test-Health {
 
     Write-Host ""
     Write-Info "Checking gateway..."
+    $gwRunning = $false
     $health = openclaw health 2>$null
-    if ($health -match "OK") {
-        Write-Success "Gateway: running"
+    if ($health -match "OK") { $gwRunning = $true }
+    elseif (Test-PortInUse -Port 18789) { $gwRunning = $true }
+    if ($gwRunning) {
+        Write-Success "Gateway: running (port 18789)"
         $passed++
     } else {
         Write-Warn "Gateway: not running (use option 7 to start)"
@@ -1329,7 +1400,7 @@ if ($Help) {
     Write-Host @"
 OpenClaw Studio v$VERSION - Multi-Agent Orchestration Platform
 
-Usage: .\openclaw-setup.ps1 [-Action <action>] [-Debug] [-Help]
+Usage: .\openclaw-studio.ps1 [-Action <action>] [-Debug] [-Help]
 
 Actions:
   install    Install OpenClaw and dependencies
