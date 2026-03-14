@@ -1,8 +1,15 @@
 <#
 .SYNOPSIS
-    OpenClaw Studio - Multi-Agent Orchestration Platform v5.3.0
+    OpenClaw Studio - Multi-Agent Orchestration Platform v5.3.1
 
 .DESCRIPTION
+    v5.3.1 - Windows parity + group chat docs:
+      - Added Set-AgentModel (parity with bash set_agent_model)
+      - Edit-Agent: shows current values, available models, calls Set-AgentModel
+      - Test-Health: added agents config + Telegram bots checks
+      - BotFather Group Privacy reminder in agent wizard
+      - README: Group Chat setup section with groupPolicy table
+
     v5.3.0 - Provider audit, group chat, cleanup:
       - Renamed scripts: openclaw-setup.* -> openclaw-studio.*
       - Fixed ALL provider model IDs (verified against OpenClaw 2026.3.12 catalog)
@@ -39,7 +46,7 @@ if ($Debug) { $DebugPreference = "Continue" }
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-$VERSION     = "5.3.0"
+$VERSION     = "5.3.1"
 $SCRIPT_DIR  = $PSScriptRoot
 $CONFIG_DIR  = Join-Path $env:USERPROFILE ".openclaw"
 $WORKSPACE_DIR = Join-Path $CONFIG_DIR "workspace"
@@ -458,7 +465,6 @@ function Write-AuthProfiles {
     # Build new profile entry
     $authProv   = if ($PROVIDER_AUTH_ID.ContainsKey($Provider)) { $PROVIDER_AUTH_ID[$Provider] } else { $Provider }
     $profileId  = "${authProv}:manual"
-    $profileKey = $ApiKey
 
     Write-Debug-Info "Write-AuthProfiles: agent=$AgentId profile=$profileId file=$authFile"
 
@@ -466,7 +472,7 @@ function Write-AuthProfiles {
     $profiles[$profileId] = [ordered]@{
         type     = "api_key"
         provider = $authProv
-        key      = $profileKey
+        key      = $ApiKey
     }
 
     # Build output object
@@ -475,6 +481,33 @@ function Write-AuthProfiles {
 
     $output | ConvertTo-Json -Depth 5 | Set-Content -Path $authFile -Encoding UTF8
     Write-Success "Auth profile '$profileId' stored for agent '$AgentId'"
+}
+
+function Set-AgentModel {
+    param([string]$AgentId, [string]$NewModel)
+
+    $cliJson = openclaw agents list --json 2>&1 | Out-String
+    $idx = $null
+    try {
+        $agList = $cliJson | ConvertFrom-Json
+        for ($i = 0; $i -lt $agList.Count; $i++) {
+            if ($agList[$i].id -eq $AgentId) { $idx = $i; break }
+        }
+    } catch {}
+
+    if ($null -eq $idx) {
+        Write-Err "Agent '$AgentId' not found in OpenClaw (openclaw agents list)"
+        return
+    }
+
+    $r = openclaw config set "agents.list.$idx.model" $NewModel 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Success "Agent '$AgentId' model -> $NewModel"
+        openclaw gateway restart 2>$null | Out-Null
+        Write-Info "Gateway restarted"
+    } else {
+        Write-Err "openclaw config set failed for agents.list.$idx.model"
+    }
 }
 
 # =============================================================================
@@ -828,63 +861,86 @@ function Edit-Agent {
     Write-Header "Edit Agent"
 
     # Primary: OpenClaw CLI; fallback: local agents.json
-    $agents = @()
+    $agList = @()
+    $cliJson = ""
     if (Test-Command "openclaw") {
         $cliJson = openclaw agents list --json 2>&1 | Out-String
-        try { $agents = ($cliJson | ConvertFrom-Json) | ForEach-Object { $_.id } } catch {}
+        try { $agList = $cliJson | ConvertFrom-Json } catch {}
     }
-    if ($agents.Count -eq 0 -and (Test-Path $AGENTS_CONFIG)) {
-        try { $agents = (Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json).agents.PSObject.Properties.Name } catch {}
+    $agentIds = @($agList | ForEach-Object { $_.id })
+    if ($agentIds.Count -eq 0 -and (Test-Path $AGENTS_CONFIG)) {
+        try { $agentIds = @((Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json).agents.PSObject.Properties.Name) } catch {}
     }
-    if ($agents.Count -eq 0) { Write-Warn "No agents configured"; return }
+    if ($agentIds.Count -eq 0) { Write-Warn "No agents configured"; return }
 
-    for ($i = 0; $i -lt $agents.Count; $i++) {
-        Write-Host ("  {0}) {1}" -f ($i+1), $agents[$i])
+    Write-Host ""
+    for ($i = 0; $i -lt $agentIds.Count; $i++) {
+        $curMdl = ($agList | Where-Object { $_.id -eq $agentIds[$i] } | Select-Object -First 1).model
+        if (-not $curMdl) { $curMdl = "(default)" }
+        Write-Host ("  {0}) {1,-20}  model: {2}" -f ($i+1), $agentIds[$i], $curMdl)
     }
     Write-Host ""
     $choice = [int](Read-Host "Select agent to edit") - 1
-    if ($choice -lt 0 -or $choice -ge $agents.Count) { Write-Err "Invalid selection"; return }
+    if ($choice -lt 0 -or $choice -ge $agentIds.Count) { Write-Err "Invalid selection"; return }
 
-    $agentId = $agents[$choice]
+    $agentId = $agentIds[$choice]
 
     # Fetch current values from CLI
-    $curModel = (openclaw config get "agents" 2>$null | Out-String) -replace '.*',''
-    $curGroupPolicy = try { (openclaw config get "channels.telegram.accounts.$agentId.groupPolicy" 2>$null).Trim().Trim('"') } catch { "not set" }
+    $ag = $agList | Where-Object { $_.id -eq $agentId } | Select-Object -First 1
+    $curModel = if ($ag.model) { $ag.model } else { "" }
+    $curName  = if ($ag.identityName) { $ag.identityName } elseif ($ag.name) { $ag.name } else { $agentId }
+    $curAllow = ""
+    try { $curAllow = (openclaw config get "channels.telegram.accounts.$agentId.allowFrom" 2>$null | Out-String).Trim() } catch {}
+    $curGroupPolicy = ""
+    try { $curGroupPolicy = (openclaw config get "channels.telegram.accounts.$agentId.groupPolicy" 2>$null | Out-String).Trim().Trim('"') } catch {}
+    if (-not $curGroupPolicy) { $curGroupPolicy = "not set" }
 
     Write-Host ""
     Write-Info "Editing: $agentId  (Enter = keep current)"
     Write-Host ""
-    Write-Host "  1. Change model"
-    Write-Host "  2. Change name"
+    Write-Host "  1. Change model   [$curModel]"
+    Write-Host "  2. Change name    [$curName]"
     Write-Host "  3. Change bot token"
-    Write-Host "  4. Change allowed IDs"
-    Write-Host "  5. Change group policy [$curGroupPolicy]"
+    Write-Host "  4. Change allowed IDs  [$curAllow]"
+    Write-Host "  5. Change group policy  [$curGroupPolicy]"
     Write-Host "  0. Cancel"
     Write-Host ""
     $editChoice = Read-Host "What to edit"
 
     switch ($editChoice) {
         "1" {
-            $newModel = Read-Host "New model (e.g. google/gemini-2.0-flash)"
+            Write-Host ""
+            Write-Host "  Available models:" -ForegroundColor White
+            $mi = 1
+            foreach ($p in $PROVIDER_MODELS.Keys) {
+                $firstModel = $PROVIDER_MODELS[$p][0]
+                Write-Host ("    {0}) {1}/{2}" -f $mi, $p, $firstModel)
+                $mi++
+            }
+            Write-Host ""
+            $newModel = Read-Host "New model (e.g. google/gemini-2.0-flash) [$curModel]"
             if ($newModel) {
+                Set-AgentModel -AgentId $agentId -NewModel $newModel
                 $newProvider = ($newModel -split "/")[0]
                 $newKey = Read-Host "API key for $newProvider (Enter to skip)"
-                Write-AuthProfiles -AgentId $agentId -Provider $newProvider -ApiKey $newKey
+                if ($newKey) { Write-AuthProfiles -AgentId $agentId -Provider $newProvider -ApiKey $newKey }
+            } else {
+                Write-Info "Model unchanged"
             }
         }
         "2" {
-            $newName = Read-Host "New name"
+            $newName = Read-Host "New name [$curName]"
             if ($newName) {
                 openclaw agents set-identity --agent $agentId --name $newName 2>$null | Out-Null
                 if ($LASTEXITCODE -eq 0) { Write-Success "Name updated to '$newName'" }
-            }
+            } else { Write-Info "Name unchanged" }
         }
         "3" {
             $newBot = Read-Host "New bot token"
-            if ($newBot) { Add-TelegramChannel -AccountId $agentId -BotToken $newBot }
+            if ($newBot) { Add-TelegramChannel -AccountId $agentId -BotToken $newBot -DisplayName $curName }
         }
         "4" {
-            $newAllow = Read-Host "Allowed Telegram IDs (comma-separated, * for open)"
+            $newAllow = Read-Host "Allowed Telegram IDs (comma-separated, * for open) [$curAllow]"
             if ($newAllow) { Set-TelegramAllowlist -AccountId $agentId -AllowIds $newAllow }
         }
         "5" {
@@ -897,7 +953,7 @@ function Edit-Agent {
             if ($gpVal) {
                 openclaw config set "channels.telegram.accounts.$agentId.groupPolicy" $gpVal 2>$null | Out-Null
                 Write-Success "Group policy: $gpVal"
-            }
+            } else { Write-Info "Group policy unchanged" }
         }
         "0" { return }
     }
@@ -1215,6 +1271,38 @@ function Test-Health {
     } else {
         Write-Warn "Gateway: not running (use option 7 to start)"
         $warnings++
+    }
+
+    Write-Host ""
+    Write-Info "Checking configuration..."
+    if (Test-Path $AGENTS_CONFIG) {
+        try {
+            $count = ((Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json).agents.PSObject.Properties | Measure-Object).Count
+            Write-Success "Agents configured: $count"
+            $passed++
+        } catch {
+            Write-Warn "Could not parse agents.json"
+            $warnings++
+        }
+    } else {
+        Write-Warn "No agents configured"
+        $warnings++
+    }
+
+    Write-Host ""
+    Write-Info "Checking Telegram bots..."
+    if (Test-Path $AGENTS_CONFIG) {
+        try {
+            $cfg = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+            $botCount = ($cfg.agents.PSObject.Properties | Where-Object { $_.Value.bot_token } | Measure-Object).Count
+            if ($botCount -gt 0) {
+                Write-Success "$botCount Telegram bot(s) configured"
+                $passed++
+            } else {
+                Write-Warn "No Telegram bots configured"
+                $warnings++
+            }
+        } catch {}
     }
 
     Write-Host ""

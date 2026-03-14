@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 #
 # OpenClaw Studio - Multi-Agent Orchestration Platform
-# Version: 5.3.0
+# Version: 5.3.1
+#
+# v5.3.1 — Windows parity + group chat docs:
+#   - Added Set-AgentModel to PS1 (parity with bash set_agent_model)
+#   - PS1 Edit-Agent: shows current values, available models, calls Set-AgentModel
+#   - PS1 Test-Health: added agents config + Telegram bots checks
+#   - BotFather Group Privacy reminder in agent wizard (both scripts)
+#   - README: Group Chat setup section with groupPolicy table
 #
 # v5.3.0 — Provider audit, group chat, cleanup:
 #   - Renamed scripts: openclaw-setup.* → openclaw-studio.*
@@ -23,7 +30,7 @@
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-VERSION="5.3.0"
+VERSION="5.3.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${HOME}/.openclaw"
 WORKSPACE_DIR="${HOME}/.openclaw/workspace"

@@ -5,12 +5,12 @@
 ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║
 ╚██████╔╝██║     ███████╗██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝
  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝
-          ─────────────  S T U D I O  ─────────────  v 5.3.0
+          ─────────────  S T U D I O  ─────────────  v 5.3.1
 ```
 
 > **Thin config layer for OpenClaw** — writes JSON presets, calls the CLI, and gets out of the way. Cloud models only. No local inference, no RAM bloat from this repo.
 
-![version](https://img.shields.io/badge/version-5.3.0-blue) ![openclaw](https://img.shields.io/badge/OpenClaw-2026.3.12-green) ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+![version](https://img.shields.io/badge/version-5.3.1-blue) ![openclaw](https://img.shields.io/badge/OpenClaw-2026.3.12-green) ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 
 ---
 
@@ -408,6 +408,14 @@ systemctl --user restart openclaw-gateway.service
 ---
 
 ## Changelog
+
+### v5.3.1
+- **Added (PS1):** `Set-AgentModel` function — parity with bash `set_agent_model`
+- **Fixed (PS1):** `Edit-Agent` now shows current values, available models list, and actually sets model via CLI
+- **Fixed (PS1):** `Test-Health` now checks agents config + Telegram bots (was missing)
+- **Added:** BotFather Group Privacy reminder in agent wizard (both scripts)
+- **Added:** Group Chat setup section in README with `groupPolicy` table and BotFather instructions
+- **Cleanup:** Removed redundant `$profileKey` variable in PS1 `Write-AuthProfiles`
 
 ### v5.3.0
 - **Renamed:** Scripts `openclaw-setup.*` → `openclaw-studio.*`
