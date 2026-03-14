@@ -706,6 +706,10 @@ create_agent_interactive() {
     allow_ids=""
     if [[ -n "$bot_token" ]]; then
         echo ""
+        print_warning "For GROUP CHAT: disable Group Privacy in @BotFather"
+        print_info "  BotFather → /mybots → ${agent_id} → Bot Settings → Group Privacy → Turn off"
+        print_info "  Without this, the bot only sees @mentions and /commands in groups."
+        echo ""
         print_step "Restrict bot to specific Telegram user IDs"
         print_info "Get your Telegram ID: use option 8 in main menu, or message @userinfobot"
         read -rp "$(echo -e "${CYAN}Allowed User IDs${NC} (comma-separated, or '*' for all): ")" allow_ids

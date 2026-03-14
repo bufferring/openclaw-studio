@@ -302,7 +302,35 @@ openclaw plugins enable telegram
 openclaw channels add --channel telegram --token <TOKEN> --account <ID> --name <NAME>
 openclaw config set channels.telegram.accounts.<ID>.allowFrom '[88885811]'
 openclaw config set channels.telegram.accounts.<ID>.dmPolicy allowlist
+openclaw config set channels.telegram.accounts.<ID>.groupPolicy open
+openclaw config set channels.telegram.accounts.<ID>.groupAllowFrom '[88885811]'
 openclaw agents add <ID> --model <MODEL> --workspace <DIR> --bind telegram:<ID>
+```
+
+### Group Chat
+
+Two things are required for bots to work in Telegram groups:
+
+**1. BotFather Group Privacy (Telegram-side, required)**
+
+By default Telegram bots only see `@mentions` and `/commands` in groups. To let the bot see all messages:
+
+> [@BotFather](https://t.me/BotFather) → `/mybots` → select bot → **Bot Settings** → **Group Privacy** → **Turn off**
+
+Verify with: `curl https://api.telegram.org/bot<TOKEN>/getMe` — look for `"can_read_all_group_messages": true`.
+
+**2. OpenClaw `groupPolicy` (config-side)**
+
+| Value | Behavior |
+|---|---|
+| `open` | Bot responds to anyone in the group |
+| `allowlist` | Bot only responds to IDs in `groupAllowFrom` |
+| `off` | Bot ignores all group messages |
+
+The setup script sets `groupPolicy` to match `dmPolicy` by default. Edit per-agent via option **5** in the main menu → Edit Agent → Change group policy, or directly:
+
+```bash
+openclaw config set channels.telegram.accounts.<ID>.groupPolicy open
 ```
 
 ---

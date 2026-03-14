@@ -596,6 +596,11 @@ function New-AgentInteractive {
     $botToken = Read-Host "Bot Token (from @BotFather, or Enter to skip)"
     $allowIds = ""
     if ($botToken) {
+        Write-Host ""
+        Write-Warn "For GROUP CHAT: disable Group Privacy in @BotFather"
+        Write-Info "  BotFather -> /mybots -> $agentId -> Bot Settings -> Group Privacy -> Turn off"
+        Write-Info "  Without this, the bot only sees @mentions and /commands in groups."
+        Write-Host ""
         Write-Step "Restrict bot to specific Telegram user IDs"
         Write-Info "Get your ID: use option 8 in main menu, or message @userinfobot"
         $allowIds = Read-Host "Allowed User IDs (comma-separated, or '*' for all)"
