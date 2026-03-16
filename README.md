@@ -409,6 +409,13 @@ systemctl --user restart openclaw-gateway.service
 
 ## Changelog
 
+### v5.3.4
+- **Fixed (PS1):** `Test-Health` voice check — now filters lobster prefix from `openclaw config get` output (parity with `Show-Checklist`)
+- **Fixed (PS1):** `Prefetch-WhisperModel` — replaced hardcoded `pwsh` (PS7+ only) with auto-detection; falls back to `powershell` for PS5 users
+- **Fixed (bash):** `show_checklist` Telegram section — success/error branches now correctly increment `passed++`/`failed++` counters
+- **Fixed (bash):** `import_skills` nvm path resolution — replaced `head -1` (alphabetically-first) with `sort -V | tail -1` (highest semver = active version)
+- **Fixed (bash):** `configure_telegram_allowlist` jq fallback — now strips spaces from IDs to prevent `["123"," 456"]` malformed JSON
+
 ### v5.3.3
 - **Fixed (bash):** `Edit Agent > Group policy` — `&&` chain replaced with `if/else`; failure now prints an error instead of silently passing
 - **Fixed (bash):** Agent wizard skills fallback was listing `~/.openclaw/agents/` (agent dirs) instead of the openclaw skills directory

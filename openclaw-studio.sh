@@ -39,7 +39,7 @@
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-VERSION="5.3.3"
+VERSION="5.3.4"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${HOME}/.openclaw"
 WORKSPACE_DIR="${HOME}/.openclaw/workspace"
@@ -391,10 +391,10 @@ import_skills() {
                 break
             fi
         done
-        # Try nvm path
+        # Try nvm path (sort -V picks the highest semver, not alphabetically-first)
         if [[ -z "$openclaw_skills" && -d "$HOME/.nvm/versions/node" ]]; then
             local nv
-            nv=$(ls "$HOME/.nvm/versions/node" 2>/dev/null | head -1)
+            nv=$(ls "$HOME/.nvm/versions/node" 2>/dev/null | sort -V | tail -1)
             [[ -n "$nv" ]] && openclaw_skills="$HOME/.nvm/versions/node/$nv/lib/node_modules/openclaw/skills"
         fi
     fi
@@ -510,7 +510,7 @@ configure_telegram_allowlist() {
             2>/dev/null)
         if [[ -z "$allow_json" ]]; then
             # jq fallback: build array manually
-            allow_json=$(printf '["%s"]' "$(echo "$allow_ids" | tr ',' '","')")
+            allow_json=$(printf '["%s"]' "$(echo "$allow_ids" | tr ',' '"' | sed 's/[[:space:]]//g')")
         fi
         dm_policy="allowlist"
     fi
@@ -1364,8 +1364,10 @@ show_checklist() {
         echo "$ch_status" | grep -i "telegram" | while IFS= read -r line; do
             if echo "$line" | grep -qi "running"; then
                 printf "  ${GREEN}✓${NC} %s\n" "$line"
+                ((passed++))
             elif echo "$line" | grep -qi "error\|stopped"; then
                 printf "  ${RED}✗${NC} %s\n" "$line"
+                ((failed++))
             else
                 printf "  ${BLUE}ℹ${NC} %s\n" "$line"
             fi

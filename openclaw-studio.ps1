@@ -46,7 +46,7 @@ if ($Debug) { $DebugPreference = "Continue" }
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-$VERSION     = "5.3.3"
+$VERSION     = "5.3.4"
 $SCRIPT_DIR  = $PSScriptRoot
 $CONFIG_DIR  = Join-Path $env:USERPROFILE ".openclaw"
 $WORKSPACE_DIR = Join-Path $CONFIG_DIR "workspace"
@@ -1449,7 +1449,8 @@ function Prefetch-WhisperModel {
     param([string]$Model)
     if (-not (Test-Path $VOICE_RUNNER)) { return }
     Write-Info "Pre-downloading Whisper model '$Model' (this may take a while)..."
-    pwsh -NoProfile -File $VOICE_RUNNER -Prefetch -Model $Model 2>$null | Out-Null
+    $psExe = if (Get-Command "pwsh" -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell" }
+    & $psExe -NoProfile -File $VOICE_RUNNER -Prefetch -Model $Model 2>$null | Out-Null
     if ($LASTEXITCODE -eq 0) { Write-Success "Model '$Model' cached at $VOICE_CACHE_DIR" }
     else { Write-Warn "Prefetch failed - model will download on first transcription" }
 }
@@ -1570,7 +1571,7 @@ function Test-Health {
     Write-Host ""
     Write-Info "Checking voice transcription (Whisper)..."
     $voiceEnabled = ""
-    try { $voiceEnabled = (openclaw config get "voiceTranscription.enabled" 2>$null | Out-String).Trim().Trim('"') } catch {}
+    try { $voiceEnabled = (openclaw config get "voiceTranscription.enabled" 2>$null | Where-Object { $_ -notmatch "^\s*$|lobster|claw" } | Out-String).Trim().Trim('"') } catch {}
     if ($voiceEnabled -eq "true") {
         if (Test-Path $VOICE_RUNNER) {
             Write-Success "Whisper runner: $VOICE_RUNNER"
