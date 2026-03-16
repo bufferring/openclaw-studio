@@ -46,14 +46,24 @@ if ($Debug) { $DebugPreference = "Continue" }
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-$VERSION     = "5.3.1"
+$VERSION     = "5.3.2"
 $SCRIPT_DIR  = $PSScriptRoot
 $CONFIG_DIR  = Join-Path $env:USERPROFILE ".openclaw"
 $WORKSPACE_DIR = Join-Path $CONFIG_DIR "workspace"
 $AGENTS_DIR  = Join-Path $CONFIG_DIR "agents"
 $BACKUP_DIR  = Join-Path $env:USERPROFILE ".openclaw-backups"
 $LOG_FILE    = Join-Path $CONFIG_DIR "setup.log"
-$AGENTS_CONFIG = Join-Path $CONFIG_DIR "agents.json"
+$AGENTS_CONFIG   = Join-Path $CONFIG_DIR "agents.json"
+$VOICE_BIN_DIR   = Join-Path $CONFIG_DIR "bin"
+$VOICE_DIR       = Join-Path $CONFIG_DIR "voice"
+$VOICE_VENV_DIR  = Join-Path $VOICE_DIR "venv"
+$VOICE_SCRIPT    = Join-Path $VOICE_DIR "transcribe.py"
+$VOICE_MODEL_FILE = Join-Path $VOICE_DIR "model"
+$VOICE_RUNNER    = Join-Path $VOICE_BIN_DIR "voice-transcribe.ps1"
+$VOICE_CACHE_DIR = Join-Path $env:USERPROFILE ".cache\whisper"
+$VOICE_ENV_FILE  = Join-Path $VOICE_DIR "env.ps1"
+$WHISPER_PY_PACKAGE = "openai-whisper"
+$WHISPER_MODELS  = @("tiny","base","small","medium","large-v3")
 
 $PROVIDERS = [ordered]@{
     "google"     = "Google Gemini (Free tier)"
@@ -338,8 +348,16 @@ function Import-Skills {
     $srcSkills = Join-Path $tmpDir "skills"
     $before = (Get-ChildItem $openclawSkills -Directory -ErrorAction SilentlyContinue | Measure-Object).Count
     Copy-Item "$srcSkills\*" $openclawSkills -Recurse -Force 2>$null
+
+    # Also install bundled skills from this repo's skills/ directory
+    $localSkillsDir = Join-Path $SCRIPT_DIR "skills"
+    if (Test-Path $localSkillsDir) {
+        Copy-Item "$localSkillsDir\*" $openclawSkills -Recurse -Force 2>$null
+        Write-Info "Bundled skills also installed from $localSkillsDir"
+    }
+
     $after = (Get-ChildItem $openclawSkills -Directory -ErrorAction SilentlyContinue | Measure-Object).Count
-    Write-Success "$($after - $before) new skills imported ($after total) → $openclawSkills"
+    Write-Success "$($after - $before) new skills imported ($after total) -> $openclawSkills"
 
     # Verify OpenClaw discovers the imported skills
     if (Test-Command "openclaw") {
@@ -911,14 +929,30 @@ function Edit-Agent {
         "1" {
             Write-Host ""
             Write-Host "  Available models:" -ForegroundColor White
+            $providerOrder = @("google","groq","zai","anthropic","openai","openrouter")
+            $modelList = @()
             $mi = 1
-            foreach ($p in $PROVIDER_MODELS.Keys) {
+            foreach ($p in $providerOrder) {
+                if (-not $PROVIDER_MODELS.ContainsKey($p)) { continue }
                 $firstModel = $PROVIDER_MODELS[$p][0]
+                $modelList += "$p/$firstModel"
                 Write-Host ("    {0}) {1}/{2}" -f $mi, $p, $firstModel)
                 $mi++
             }
+            Write-Host ("    {0}) Enter custom model ID" -f $mi)
             Write-Host ""
-            $newModel = Read-Host "New model (e.g. google/gemini-2.0-flash) [$curModel]"
+            $newModel = Read-Host "New model - number or full string [$curModel]"
+            # Resolve numeric selection
+            if ($newModel -match '^\d+$') {
+                $sel = [int]$newModel - 1
+                if ($sel -ge 0 -and $sel -lt $modelList.Count) {
+                    $newModel = $modelList[$sel]
+                } elseif ($sel -eq $modelList.Count) {
+                    $newModel = Read-Host "Custom model ID"
+                } else {
+                    $newModel = ""
+                }
+            }
             if ($newModel) {
                 Set-AgentModel -AgentId $agentId -NewModel $newModel
                 $newProvider = ($newModel -split "/")[0]
@@ -930,10 +964,13 @@ function Edit-Agent {
         }
         "2" {
             $newName = Read-Host "New name [$curName]"
-            if ($newName) {
+            if (-not $newName) {
+                Write-Info "Name unchanged"
+            } else {
                 openclaw agents set-identity --agent $agentId --name $newName 2>$null | Out-Null
                 if ($LASTEXITCODE -eq 0) { Write-Success "Name updated to '$newName'" }
-            } else { Write-Info "Name unchanged" }
+                else { Write-Err "Failed to update name for '$agentId'" }
+            }
         }
         "3" {
             $newBot = Read-Host "New bot token"
@@ -1230,6 +1267,166 @@ function Test-TelegramBot {
 }
 
 # =============================================================================
+# VOICE TRANSCRIPTION (WHISPER)
+# =============================================================================
+
+function Select-WhisperModel {
+    Write-Host ""
+    Write-Step "Select Whisper model:"
+    $notes = @{ "tiny"="~75MB fastest"; "base"="~145MB recommended"; "small"="~490MB better"; "medium"="~1.5GB high"; "large-v3"="~3.1GB best" }
+    for ($i = 0; $i -lt $WHISPER_MODELS.Count; $i++) {
+        $m = $WHISPER_MODELS[$i]
+        Write-Host ("  {0}) {1}  - {2}" -f ($i+1), $m, $notes[$m])
+    }
+    Write-Host ""
+    $mc = Read-Host "Select model [default=2 base]"
+    if ([string]::IsNullOrWhiteSpace($mc)) { $mc = "2" }
+    if ($mc -match '^\d+$') {
+        $idx = [int]$mc - 1
+        if ($idx -ge 0 -and $idx -lt $WHISPER_MODELS.Count) { return $WHISPER_MODELS[$idx] }
+    }
+    return "base"
+}
+
+function Install-WhisperPython {
+    Write-Step "Setting up Python venv for Whisper..."
+    $py = if (Test-Command "python3") { "python3" } elseif (Test-Command "python") { "python" } else { $null }
+    if (-not $py) { Write-Err "Python not found. Install Python 3.9+ first."; return $false }
+    New-Item -ItemType Directory -Force -Path $VOICE_DIR | Out-Null
+    if (-not (Test-Path $VOICE_VENV_DIR)) {
+        & $py -m venv $VOICE_VENV_DIR 2>$null
+        if ($LASTEXITCODE -ne 0) { Write-Err "Failed to create venv at $VOICE_VENV_DIR"; return $false }
+        Write-Success "Python venv created at $VOICE_VENV_DIR"
+    } else { Write-Info "Python venv already exists" }
+    $pip = if (Test-Path (Join-Path $VOICE_VENV_DIR "Scripts\pip.exe")) { Join-Path $VOICE_VENV_DIR "Scripts\pip.exe" } else { Join-Path $VOICE_VENV_DIR "bin\pip" }
+    Write-Step "Installing $WHISPER_PY_PACKAGE (may take a few minutes)..."
+    & $pip install --quiet --upgrade pip 2>$null | Out-Null
+    & $pip install --quiet $WHISPER_PY_PACKAGE 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Success "$WHISPER_PY_PACKAGE installed"; return $true }
+    Write-Err "pip install $WHISPER_PY_PACKAGE failed"; return $false
+}
+
+function Write-WhisperScript {
+    New-Item -ItemType Directory -Force -Path $VOICE_DIR | Out-Null
+    $pyLines = @(
+        '#!/usr/bin/env python3',
+        '"""OpenClaw Studio - local Whisper transcription script."""',
+        'import argparse, os, sys, pathlib',
+        '',
+        'def main():',
+        '    ap = argparse.ArgumentParser(description="Transcribe audio with local Whisper")',
+        '    ap.add_argument("audio", nargs="?", help="Input audio file")',
+        '    ap.add_argument("--model", default=None)',
+        '    ap.add_argument("--language", default=None)',
+        '    ap.add_argument("--prefetch", action="store_true")',
+        '    args = ap.parse_args()',
+        '    model_file = os.environ.get("WHISPER_MODEL_FILE", os.path.expanduser("~/.openclaw/voice/model"))',
+        '    model = args.model',
+        '    if not model and os.path.isfile(model_file):',
+        '        model = pathlib.Path(model_file).read_text().strip()',
+        '    if not model: model = "base"',
+        '    cache_dir = os.environ.get("WHISPER_CACHE_DIR", os.path.join(os.path.expanduser("~"), ".cache", "whisper"))',
+        '    os.makedirs(cache_dir, exist_ok=True)',
+        '    try:',
+        '        import whisper',
+        '    except ImportError:',
+        '        print("openai-whisper not installed in this venv", file=sys.stderr); sys.exit(1)',
+        '    print(f"Loading model \'{model}\'...", file=sys.stderr)',
+        '    m = whisper.load_model(model, download_root=cache_dir)',
+        '    if args.prefetch:',
+        '        print(f"Model \'{model}\' ready", file=sys.stderr); return',
+        '    if not args.audio: print("No audio file provided", file=sys.stderr); sys.exit(1)',
+        '    if not os.path.isfile(args.audio): print(f"File not found: {args.audio}", file=sys.stderr); sys.exit(1)',
+        '    result = m.transcribe(args.audio, language=args.language)',
+        '    print(result["text"].strip())',
+        '',
+        'if __name__ == "__main__": main()'
+    )
+    $pyLines | Set-Content -Path $VOICE_SCRIPT -Encoding UTF8
+    Write-Success "Whisper transcription script written to $VOICE_SCRIPT"
+}
+
+function Write-WhisperRunner {
+    New-Item -ItemType Directory -Force -Path $VOICE_BIN_DIR | Out-Null
+    $venvPy = Join-Path $VOICE_VENV_DIR "Scripts\python.exe"
+    if (-not (Test-Path $venvPy)) { $venvPy = Join-Path $VOICE_VENV_DIR "bin\python3" }
+    $lines = @(
+        '# OpenClaw Studio - voice-transcribe runner (auto-generated)',
+        "param([string]`$AudioFile, [string]`$Model = `"`", [string]`$Language = `"`", [switch]`$Prefetch)",
+        "`$env:WHISPER_CACHE_DIR  = if (`$env:WHISPER_CACHE_DIR)  { `$env:WHISPER_CACHE_DIR }  else { `"$VOICE_CACHE_DIR`" }",
+        "`$env:WHISPER_MODEL_FILE = if (`$env:WHISPER_MODEL_FILE) { `$env:WHISPER_MODEL_FILE } else { `"$VOICE_MODEL_FILE`" }",
+        "`$py = `"$venvPy`"",
+        "`$args2 = @()",
+        "if (`$Prefetch)  { `$args2 += '--prefetch' }",
+        "if (`$AudioFile) { `$args2 += `$AudioFile }",
+        "if (`$Model)     { `$args2 += '--model'; `$args2 += `$Model }",
+        "if (`$Language)  { `$args2 += '--language'; `$args2 += `$Language }",
+        "& `$py `"$VOICE_SCRIPT`" @args2"
+    )
+    $lines | Set-Content -Path $VOICE_RUNNER -Encoding UTF8
+    Write-Success "Voice runner installed at $VOICE_RUNNER"
+}
+
+function Write-WhisperEnv {
+    New-Item -ItemType Directory -Force -Path $VOICE_DIR | Out-Null
+    @(
+        '# Auto-generated by OpenClaw Studio - dot-source to expose WHISPER_* vars',
+        "`$env:WHISPER_RUNNER     = `"$VOICE_RUNNER`"",
+        "`$env:WHISPER_MODEL_FILE = `"$VOICE_MODEL_FILE`"",
+        "`$env:WHISPER_CACHE_DIR  = `"$VOICE_CACHE_DIR`"",
+        "`$env:WHISPER_VENV       = `"$VOICE_VENV_DIR`"",
+        "`$env:PATH               = `"$VOICE_BIN_DIR;`" + `$env:PATH"
+    ) | Set-Content -Path $VOICE_ENV_FILE -Encoding UTF8
+    Write-Info "Env file: $VOICE_ENV_FILE  (dot-source to load WHISPER_* vars)"
+}
+
+function Prefetch-WhisperModel {
+    param([string]$Model)
+    if (-not (Test-Path $VOICE_RUNNER)) { return }
+    Write-Info "Pre-downloading Whisper model '$Model' (this may take a while)..."
+    pwsh -NoProfile -File $VOICE_RUNNER -Prefetch -Model $Model 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { Write-Success "Model '$Model' cached at $VOICE_CACHE_DIR" }
+    else { Write-Warn "Prefetch failed - model will download on first transcription" }
+}
+
+function Configure-VoiceTranscription {
+    param([bool]$Enabled, [string]$Model = "")
+    $val = if ($Enabled) { "true" } else { "false" }
+    openclaw config set "voiceTranscription.enabled" $val 2>$null | Out-Null
+    if ($Model) { openclaw config set "voiceTranscription.model" $Model 2>$null | Out-Null }
+    openclaw config set "voiceTranscription.runner" $VOICE_RUNNER 2>$null | Out-Null
+}
+
+function Setup-WhisperTranscription {
+    Write-Header "Voice Transcription (Whisper)"
+    Write-Host ""
+    Write-Info "Enables local speech-to-text for Telegram voice notes."
+    Write-Info "No API key required - runs fully on-device using openai-whisper."
+    Write-Host ""
+
+    if (-not (Confirm-Action "Enable Telegram voice-note transcription with local Whisper?" "y")) {
+        Configure-VoiceTranscription -Enabled:$false -Model:""
+        Write-Info "Voice transcription disabled"
+        return
+    }
+
+    $model = Select-WhisperModel
+    Set-Content -Path $VOICE_MODEL_FILE -Value $model -Encoding UTF8
+    Write-Info "Selected model: $model"
+
+    if (-not (Install-WhisperPython)) { return }
+    Write-WhisperScript
+    Write-WhisperRunner
+    Write-WhisperEnv
+    Prefetch-WhisperModel -Model $model
+    Configure-VoiceTranscription -Enabled:$true -Model:$model
+
+    Write-Success "Voice transcription enabled (model: $model)"
+    Write-Info "Runner:   $VOICE_RUNNER"
+    Write-Info "Env file: $VOICE_ENV_FILE"
+}
+
+# =============================================================================
 # HEALTH CHECK
 # =============================================================================
 
@@ -1303,6 +1500,37 @@ function Test-Health {
                 $warnings++
             }
         } catch {}
+    }
+
+    Write-Host ""
+    Write-Info "Checking voice transcription (Whisper)..."
+    $voiceEnabled = ""
+    try { $voiceEnabled = (openclaw config get "voiceTranscription.enabled" 2>$null | Out-String).Trim().Trim('"') } catch {}
+    if ($voiceEnabled -eq "true") {
+        if (Test-Path $VOICE_RUNNER) {
+            Write-Success "Whisper runner: $VOICE_RUNNER"
+            $passed++
+        } else {
+            Write-Err "Whisper runner not found: $VOICE_RUNNER"
+            $failed++
+        }
+        if (Test-Path $VOICE_VENV_DIR) {
+            Write-Success "Whisper venv: $VOICE_VENV_DIR"
+            $passed++
+        } else {
+            Write-Warn "Whisper venv not found (re-run setup)"
+            $warnings++
+        }
+        if (Test-Path $VOICE_MODEL_FILE) {
+            $wmodel = (Get-Content $VOICE_MODEL_FILE -Raw).Trim()
+            Write-Success "Whisper model: $wmodel"
+            $passed++
+        } else {
+            Write-Warn "No Whisper model file at $VOICE_MODEL_FILE"
+            $warnings++
+        }
+    } else {
+        Write-Info "Voice transcription not enabled (run setup to configure)"
     }
 
     Write-Host ""
@@ -1396,6 +1624,9 @@ function Show-InstallMenu {
 
     # Auto-import skills — agents need these out-of-the-box
     Import-Skills
+
+    # Optional: local Whisper voice transcription
+    Setup-WhisperTranscription
 
     Press-Enter
 }

@@ -3,6 +3,15 @@
 # OpenClaw Studio - Multi-Agent Orchestration Platform
 # Version: 5.3.1
 #
+# v5.3.2 — Edit-Agent fix + Whisper skill wrapper + health checks:
+#   - Fixed: Edit Agent > Change model: numeric input now resolves to actual model string
+#   - Fixed: Model list uses stable ordered provider list (was unordered associative array)
+#   - Fixed: Edit Agent > Change name: proper if/else instead of silent &&/|| chain
+#   - Added: voice-transcribe bundled skill (skills/voice-transcribe/)
+#   - Added: import_skills installs bundled skills from repo's skills/ directory
+#   - Added: Whisper health check in show_checklist
+#   - Added: WHISPER_* env export file (env.sh)
+#
 # v5.3.1 — Windows parity + group chat docs:
 #   - Added Set-AgentModel to PS1 (parity with bash set_agent_model)
 #   - PS1 Edit-Agent: shows current values, available models, calls Set-AgentModel
@@ -30,7 +39,7 @@
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-VERSION="5.3.1"
+VERSION="5.3.2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${HOME}/.openclaw"
 WORKSPACE_DIR="${HOME}/.openclaw/workspace"
@@ -38,6 +47,16 @@ AGENTS_DIR="${HOME}/.openclaw/agents"
 BACKUP_DIR="${HOME}/.openclaw-backups"
 LOG_FILE="${CONFIG_DIR}/setup.log"
 AGENTS_CONFIG="${CONFIG_DIR}/agents.json"
+VOICE_BIN_DIR="${CONFIG_DIR}/bin"
+VOICE_DIR="${CONFIG_DIR}/voice"
+VOICE_VENV_DIR="${VOICE_DIR}/venv"
+VOICE_SCRIPT="${VOICE_DIR}/transcribe.py"
+VOICE_MODEL_FILE="${VOICE_DIR}/model"
+VOICE_RUNNER="${VOICE_BIN_DIR}/voice-transcribe"
+VOICE_CACHE_DIR="${HOME}/.cache/whisper"
+VOICE_ENV_FILE="${VOICE_DIR}/env.sh"
+WHISPER_PY_PACKAGE="openai-whisper"
+WHISPER_MODELS=("tiny" "base" "small" "medium" "large-v3")
 DEBUG_MODE=0
 
 # Handle --debug flag before anything else
@@ -389,6 +408,15 @@ import_skills() {
     local before after
     before=$(ls -1 "$openclaw_skills" 2>/dev/null | wc -l)
     cp -r "$tmp_dir/skills/"* "$openclaw_skills/" 2>/dev/null || true
+
+    # Also install bundled skills from this repo's skills/ directory
+    local local_skills_dir
+    local_skills_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/skills"
+    if [[ -d "$local_skills_dir" ]]; then
+        cp -r "$local_skills_dir/"* "$openclaw_skills/" 2>/dev/null || true
+        print_info "Bundled skills also installed from $local_skills_dir"
+    fi
+
     after=$(ls -1 "$openclaw_skills" 2>/dev/null | wc -l)
     print_success "$((after - before)) new skills imported ($after total) → $openclaw_skills"
 
@@ -1069,14 +1097,30 @@ edit_agent() {
             1)
                 echo ""
                 echo -e "  ${BOLD}Available models:${NC}"
-                local i=1
-                for p in "${!PROVIDER_MODELS[@]}"; do
+                local provider_order=(google groq zai anthropic openai openrouter)
+                local model_list=()
+                local mi=1
+                for p in "${provider_order[@]}"; do
+                    [[ -z "${PROVIDER_MODELS[$p]:-}" ]] && continue
                     local first_model="${PROVIDER_MODELS[$p]%%|*}"
-                    printf "    %d) %s/%s\n" "$i" "$p" "$first_model"
-                    i=$((i+1))
+                    model_list+=("${p}/${first_model}")
+                    printf "    %d) %s/%s\n" "$mi" "$p" "$first_model"
+                    mi=$((mi+1))
                 done
+                printf "    %d) Enter custom model ID\n" "$mi"
                 echo ""
-                read -rp "$(echo -e "${CYAN}New model (e.g. google/gemini-2.0-flash)${NC} [$cur_model]: ")" new_model
+                read -rp "$(echo -e "${CYAN}New model — number or full string${NC} [$cur_model]: ")" new_model
+                # Resolve numeric selection
+                if [[ "$new_model" =~ ^[0-9]+$ ]]; then
+                    local sel=$(( new_model - 1 ))
+                    if [[ $sel -ge 0 && $sel -lt ${#model_list[@]} ]]; then
+                        new_model="${model_list[$sel]}"
+                    elif [[ $sel -eq ${#model_list[@]} ]]; then
+                        read -rp "$(echo -e "${CYAN}Custom model ID${NC}: ")" new_model
+                    else
+                        new_model=""
+                    fi
+                fi
                 if [[ -n "$new_model" ]]; then
                     set_agent_model "$agent_id" "$new_model"
                     local new_provider="${new_model%%/*}"
@@ -1089,9 +1133,13 @@ edit_agent() {
                 ;;
             2)
                 read -rp "$(echo -e "${CYAN}New name${NC} [$cur_name]: ")" new_name
-                [[ -n "$new_name" ]] && \
-                    openclaw agents set-identity --agent "$agent_id" --name "$new_name" 2>/dev/null && \
-                    print_success "Name updated to '$new_name'" || print_info "Name unchanged"
+                if [[ -z "$new_name" ]]; then
+                    print_info "Name unchanged"
+                elif openclaw agents set-identity --agent "$agent_id" --name "$new_name" 2>/dev/null; then
+                    print_success "Name updated to '$new_name'"
+                else
+                    print_error "Failed to update name for '$agent_id'"
+                fi
                 ;;
             3)
                 read -rp "$(echo -e "${CYAN}New bot token${NC}: ")" new_bot
@@ -1344,6 +1392,39 @@ show_checklist() {
         ((warned++))
     fi
 
+    echo ""
+    print_info "── Voice Transcription (Whisper) ──"
+
+    local voice_enabled
+    voice_enabled=$(openclaw config get "voiceTranscription.enabled" 2>/dev/null | grep -v '🦞' | tr -d '"' | tr -d '[:space:]' || echo "")
+
+    if [[ "$voice_enabled" == "true" ]]; then
+        if [[ -x "$VOICE_RUNNER" ]]; then
+            printf "  ${GREEN}✓${NC} Runner:  %s\n" "$VOICE_RUNNER"
+            ((passed++))
+        else
+            printf "  ${RED}✗${NC} Runner not found: %s\n" "$VOICE_RUNNER"
+            ((failed++))
+        fi
+        if [[ -d "$VOICE_VENV_DIR" ]]; then
+            printf "  ${GREEN}✓${NC} Python venv: %s\n" "$VOICE_VENV_DIR"
+            ((passed++))
+        else
+            printf "  ${YELLOW}⚠${NC} Python venv not found (re-run setup)\n"
+            ((warned++))
+        fi
+        if [[ -f "$VOICE_MODEL_FILE" ]]; then
+            local wmodel; wmodel=$(cat "$VOICE_MODEL_FILE" 2>/dev/null | tr -d '[:space:]')
+            printf "  ${GREEN}✓${NC} Model:   %s\n" "$wmodel"
+            ((passed++))
+        else
+            printf "  ${YELLOW}⚠${NC} No model file at %s\n" "$VOICE_MODEL_FILE"
+            ((warned++))
+        fi
+    else
+        printf "  ${BLUE}ℹ${NC} Voice transcription not enabled (run setup to configure)\n"
+    fi
+
     # Summary
     echo ""
     print_header "Summary"
@@ -1451,6 +1532,199 @@ test_telegram_bot() {
         print_error "Bot connection failed: $err"
         return 1
     fi
+}
+
+# =============================================================================
+# VOICE TRANSCRIPTION (WHISPER)
+# =============================================================================
+
+select_whisper_model() {
+    echo ""
+    print_step "Select Whisper model (larger = more accurate, slower download):"
+    local i=1
+    for m in "${WHISPER_MODELS[@]}"; do
+        local note=""
+        case "$m" in
+            tiny)     note=" — ~75MB, fastest" ;;
+            base)     note=" — ~145MB, good balance (recommended)" ;;
+            small)    note=" — ~490MB, better accuracy" ;;
+            medium)   note=" — ~1.5GB, high accuracy" ;;
+            large-v3) note=" — ~3.1GB, best accuracy" ;;
+        esac
+        printf "  %d) %s%s\n" "$i" "$m" "$note"
+        i=$((i+1))
+    done
+    echo ""
+    read -rp "$(echo -e "${CYAN}Select model${NC} [default=2 base]: ")" mc
+    [[ -z "$mc" ]] && mc=2
+    if [[ "$mc" =~ ^[0-9]+$ && $mc -ge 1 && $mc -le ${#WHISPER_MODELS[@]} ]]; then
+        echo "${WHISPER_MODELS[$((mc-1))]}"
+    else
+        echo "base"
+    fi
+}
+
+install_whisper_python() {
+    print_step "Setting up Python venv for Whisper..."
+    if ! check_command python3; then
+        print_error "python3 not found — install it first (e.g. sudo apt install python3 python3-venv)"
+        return 1
+    fi
+    mkdir -p "$VOICE_DIR"
+    if [[ ! -d "$VOICE_VENV_DIR" ]]; then
+        python3 -m venv "$VOICE_VENV_DIR" 2>/dev/null \
+            || { print_error "Failed to create Python venv at $VOICE_VENV_DIR"; return 1; }
+        print_success "Python venv created at $VOICE_VENV_DIR"
+    else
+        print_info "Python venv already exists"
+    fi
+    print_step "Installing $WHISPER_PY_PACKAGE (may take a few minutes)..."
+    "$VOICE_VENV_DIR/bin/pip" install --quiet --upgrade pip 2>/dev/null || true
+    if "$VOICE_VENV_DIR/bin/pip" install --quiet "$WHISPER_PY_PACKAGE" 2>/dev/null; then
+        print_success "$WHISPER_PY_PACKAGE installed"
+        return 0
+    else
+        print_error "pip install $WHISPER_PY_PACKAGE failed — check internet/disk"
+        return 1
+    fi
+}
+
+write_whisper_script() {
+    mkdir -p "$VOICE_DIR"
+    cat > "$VOICE_SCRIPT" <<'PYEOF'
+#!/usr/bin/env python3
+"""OpenClaw Studio — local Whisper transcription script."""
+import argparse, os, sys, pathlib
+
+def main():
+    ap = argparse.ArgumentParser(description="Transcribe audio with local Whisper")
+    ap.add_argument("audio", nargs="?", help="Input audio file")
+    ap.add_argument("--model", default=None)
+    ap.add_argument("--language", default=None)
+    ap.add_argument("--prefetch", action="store_true", help="Pre-download model only")
+    args = ap.parse_args()
+
+    model_file = os.environ.get("WHISPER_MODEL_FILE",
+                                os.path.expanduser("~/.openclaw/voice/model"))
+    model = args.model
+    if not model and os.path.isfile(model_file):
+        model = pathlib.Path(model_file).read_text().strip()
+    if not model:
+        model = "base"
+
+    cache_dir = os.environ.get("WHISPER_CACHE_DIR",
+                               os.path.expanduser("~/.cache/whisper"))
+    os.makedirs(cache_dir, exist_ok=True)
+
+    try:
+        import whisper
+    except ImportError:
+        print("openai-whisper not installed in this venv", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Loading model '{model}' (cache: {cache_dir})...", file=sys.stderr)
+    m = whisper.load_model(model, download_root=cache_dir)
+
+    if args.prefetch:
+        print(f"Model '{model}' ready", file=sys.stderr)
+        return
+
+    if not args.audio:
+        print("No audio file provided", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.isfile(args.audio):
+        print(f"File not found: {args.audio}", file=sys.stderr)
+        sys.exit(1)
+
+    result = m.transcribe(args.audio, language=args.language)
+    print(result["text"].strip())
+
+if __name__ == "__main__":
+    main()
+PYEOF
+    print_success "Whisper transcription script written to $VOICE_SCRIPT"
+}
+
+write_whisper_runner() {
+    mkdir -p "$VOICE_BIN_DIR"
+    cat > "$VOICE_RUNNER" <<EOF
+#!/usr/bin/env bash
+# OpenClaw Studio — voice-transcribe runner
+# Auto-generated; do not edit manually.
+SCRIPT_PATH="${VOICE_SCRIPT}"
+VENV="${VOICE_VENV_DIR}"
+CACHE_DIR="\${WHISPER_CACHE_DIR:-${VOICE_CACHE_DIR}}"
+MODEL_FILE="\${WHISPER_MODEL_FILE:-${VOICE_MODEL_FILE}}"
+
+export WHISPER_CACHE_DIR="\$CACHE_DIR"
+export WHISPER_MODEL_FILE="\$MODEL_FILE"
+
+exec "\$VENV/bin/python3" "\$SCRIPT_PATH" "\$@"
+EOF
+    chmod +x "$VOICE_RUNNER"
+    print_success "Voice runner installed at $VOICE_RUNNER"
+}
+
+write_whisper_env() {
+    mkdir -p "$VOICE_DIR"
+    cat > "$VOICE_ENV_FILE" <<EOF
+# Auto-generated by OpenClaw Studio — source this file to expose WHISPER_* vars
+export WHISPER_RUNNER="${VOICE_RUNNER}"
+export WHISPER_MODEL_FILE="${VOICE_MODEL_FILE}"
+export WHISPER_CACHE_DIR="${VOICE_CACHE_DIR}"
+export WHISPER_VENV="${VOICE_VENV_DIR}"
+export PATH="${VOICE_BIN_DIR}:\${PATH}"
+EOF
+    print_info "Env file: $VOICE_ENV_FILE  (add 'source $VOICE_ENV_FILE' to ~/.bashrc to persist)"
+}
+
+prefetch_whisper_model() {
+    local model="$1"
+    if [[ ! -x "$VOICE_RUNNER" ]]; then return; fi
+    print_info "Pre-downloading Whisper model '$model' (this may take a while)..."
+    if "$VOICE_RUNNER" --prefetch --model "$model" 2>/dev/null; then
+        print_success "Model '$model' cached at $VOICE_CACHE_DIR"
+    else
+        print_warning "Prefetch failed — model will download on first transcription"
+    fi
+}
+
+configure_voice_transcription() {
+    local enabled="$1" model="$2"
+    openclaw config set "voiceTranscription.enabled" "$enabled" 2>/dev/null || true
+    [[ -n "$model" ]] && openclaw config set "voiceTranscription.model" "$model" 2>/dev/null || true
+    openclaw config set "voiceTranscription.runner" "$VOICE_RUNNER" 2>/dev/null || true
+}
+
+setup_whisper_transcription() {
+    print_header "Voice Transcription (Whisper)"
+    echo ""
+    print_info "Enables local speech-to-text for Telegram voice notes."
+    print_info "No API key required — runs fully on-device using openai-whisper."
+    echo ""
+
+    if ! confirm "Enable Telegram voice-note transcription with local Whisper?" "y"; then
+        configure_voice_transcription false ""
+        print_info "Voice transcription disabled"
+        return
+    fi
+
+    local whisper_model
+    whisper_model=$(select_whisper_model)
+    printf '%s\n' "$whisper_model" > "$VOICE_MODEL_FILE"
+    print_info "Selected model: $whisper_model"
+
+    install_whisper_python || return
+    write_whisper_script
+    write_whisper_runner
+    write_whisper_env
+    prefetch_whisper_model "$whisper_model"
+    configure_voice_transcription true "$whisper_model"
+
+    print_success "Voice transcription enabled (model: $whisper_model)"
+    print_info "Runner:   $VOICE_RUNNER"
+    print_info "Env file: $VOICE_ENV_FILE"
 }
 
 # =============================================================================
@@ -1641,6 +1915,9 @@ menu_setup() {
 
     # Auto-import skills — agents need these out-of-the-box
     import_skills
+
+    # Optional: local Whisper voice transcription
+    setup_whisper_transcription
 
     press_enter
 }

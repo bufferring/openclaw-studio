@@ -5,12 +5,12 @@
 ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║
 ╚██████╔╝██║     ███████╗██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝
  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝
-          ─────────────  S T U D I O  ─────────────  v 5.3.1
+          ─────────────  S T U D I O  ─────────────  v 5.3.2
 ```
 
-> **Thin config layer for OpenClaw** — writes JSON presets, calls the CLI, and gets out of the way. Cloud models only. No local inference, no RAM bloat from this repo.
+> **Thin config layer for OpenClaw** — writes JSON presets, calls the CLI, and gets out of the way. Cloud models only (+ optional local Whisper voice transcription).
 
-![version](https://img.shields.io/badge/version-5.3.1-blue) ![openclaw](https://img.shields.io/badge/OpenClaw-2026.3.12-green) ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
+![version](https://img.shields.io/badge/version-5.3.2-blue) ![openclaw](https://img.shields.io/badge/OpenClaw-2026.3.12-green) ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)
 
 ---
 
@@ -408,6 +408,16 @@ systemctl --user restart openclaw-gateway.service
 ---
 
 ## Changelog
+
+### v5.3.2
+- **Fixed:** `Edit Agent > Change model` — numeric selection (e.g. typing `2`) now resolves to the actual model string instead of passing the literal number to the CLI
+- **Fixed:** Model list in Edit Agent now uses a stable ordered provider list (was using unordered associative-array iteration, so numbers shifted between runs)
+- **Fixed:** Edit Agent > Change name now shows a proper error on failure instead of silently showing "Name unchanged" (bash `&&/||` chain bug)
+- **Added:** `voice-transcribe` bundled skill wrapper (`skills/voice-transcribe/`) — uses the Studio-installed local Whisper runner; no API key required
+- **Added:** `import_skills` / `Import-Skills` now also installs bundled skills from the repo's own `skills/` directory
+- **Added:** Whisper health check section in `show_checklist` (bash) and `Test-Health` (PS1) — validates runner, venv, and model file
+- **Added:** Whisper `env.sh` / `env.ps1` export file written during setup with `WHISPER_*` env vars and PATH update
+- **Fixed:** Corrupted `auth-profiles.json` (provider `2:manual` → `google:manual`) caused by the numeric model resolution bug
 
 ### v5.3.1
 - **Added (PS1):** `Set-AgentModel` function — parity with bash `set_agent_model`
