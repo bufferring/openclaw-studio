@@ -1142,7 +1142,20 @@ edit_agent() {
                 ;;
             3)
                 read -rp "$(echo -e "${CYAN}New bot token${NC}: ")" new_bot
-                [[ -n "$new_bot" ]] && add_telegram_channel "$agent_id" "$new_bot" "$cur_name"
+                if [[ -n "$new_bot" ]]; then
+                    add_telegram_channel "$agent_id" "$new_bot" "$cur_name"
+                    # Persist new token in agents.json
+                    if [[ -f "$AGENTS_CONFIG" ]] && check_command jq; then
+                        local tmp
+                        tmp=$(jq --arg id "$agent_id" --arg tok "$new_bot" \
+                            '.agents[$id].bot_token = $tok' "$AGENTS_CONFIG" 2>/dev/null)
+                        [[ -n "$tmp" ]] && printf '%s\n' "$tmp" > "$AGENTS_CONFIG"
+                    fi
+                    print_warning "Gateway restart required for new token to take effect"
+                    if confirm "Restart gateway now?" "y"; then
+                        activate_agents
+                    fi
+                fi
                 ;;
             4)
                 read -rp "$(echo -e "${CYAN}Allowed Telegram IDs${NC} (comma-separated, * for open) [$cur_allow]: ")" new_allow

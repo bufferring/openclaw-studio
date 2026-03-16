@@ -1012,7 +1012,19 @@ function Edit-Agent {
         }
         "3" {
             $newBot = Read-Host "New bot token"
-            if ($newBot) { Add-TelegramChannel -AccountId $agentId -BotToken $newBot -DisplayName $curName }
+            if ($newBot) {
+                Add-TelegramChannel -AccountId $agentId -BotToken $newBot -DisplayName $curName
+                # Persist new token in agents.json
+                if (Test-Path $AGENTS_CONFIG) {
+                    try {
+                        $cfg = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+                        $cfg.agents.$agentId | Add-Member -NotePropertyName "bot_token" -NotePropertyValue $newBot -Force
+                        $cfg | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
+                    } catch {}
+                }
+                Write-Warn "Gateway restart required for new token to take effect"
+                if (Confirm-Action "Restart gateway now?" "y") { Start-Gateway }
+            }
         }
         "4" {
             $newAllow = Read-Host "Allowed Telegram IDs (comma-separated, * for open) [$curAllow]"
