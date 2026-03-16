@@ -20,16 +20,25 @@ No API key required — everything runs on-device.
 
 ## Quick start
 
+**Linux / macOS / WSL (bash):**
 ```bash
 voice-transcribe /path/to/audio.ogg
 voice-transcribe /path/to/voice_note.m4a --model medium --out /tmp/transcript.txt
 ```
 
-The runner is installed at `~/.openclaw/bin/voice-transcribe` and uses the model
-chosen during Studio setup (stored in `~/.openclaw/voice/model`).
+**Windows (PowerShell):**
+```powershell
+.\transcribe.ps1 C:\path\to\audio.ogg
+.\transcribe.ps1 C:\path\to\voice_note.m4a -Model medium -Out C:\tmp\transcript.txt
+```
+
+The runner is installed at `~/.openclaw/bin/voice-transcribe` (bash) or
+`%USERPROFILE%\.openclaw\bin\voice-transcribe.ps1` (PowerShell) and uses the
+model chosen during Studio setup (stored in `~/.openclaw/voice/model`).
 
 ## Useful flags
 
+**Bash:**
 ```bash
 voice-transcribe /path/audio.ogg --model tiny      # fast, low-accuracy
 voice-transcribe /path/audio.ogg --model base      # balanced
@@ -38,6 +47,12 @@ voice-transcribe /path/audio.ogg --model medium    # high accuracy
 voice-transcribe /path/audio.ogg --model large-v3  # best, slower
 voice-transcribe /path/audio.ogg --language en     # force language
 voice-transcribe /path/audio.ogg --out result.txt  # custom output path
+```
+
+**PowerShell:**
+```powershell
+.\transcribe.ps1 audio.ogg -Model tiny
+.\transcribe.ps1 audio.ogg -Model medium -Language en -Out result.txt
 ```
 
 ## Environment variables (set by installer)
@@ -49,16 +64,28 @@ voice-transcribe /path/audio.ogg --out result.txt  # custom output path
 | `WHISPER_CACHE_DIR`  | Directory where model weights are cached        |
 | `WHISPER_VENV`       | Path to the Python venv with openai-whisper     |
 
-Source `~/.openclaw/voice/env.sh` to populate all variables in your shell.
+Source `~/.openclaw/voice/env.sh` (bash) or `. %USERPROFILE%\.openclaw\voice\env.ps1`
+(PowerShell) to populate all variables in your shell.
 
 ## Telegram voice note integration
 
 When the OpenClaw gateway receives a Telegram voice message, it stores the file
 in the workspace and sets `TELEGRAM_VOICE_FILE`. The agent can call:
 
+**Bash:**
 ```bash
 {baseDir}/scripts/transcribe.sh "$TELEGRAM_VOICE_FILE"
 ```
 
-or simply invoke `voice-transcribe "$TELEGRAM_VOICE_FILE"` if the bin dir is
-on `PATH` (it will be after sourcing `~/.openclaw/voice/env.sh`).
+**PowerShell:**
+```powershell
+& "{baseDir}\scripts\transcribe.ps1" $env:TELEGRAM_VOICE_FILE
+```
+
+Or invoke the runner directly if the bin dir is on `PATH`:
+```bash
+voice-transcribe "$TELEGRAM_VOICE_FILE"          # bash (after sourcing env.sh)
+```
+```powershell
+& voice-transcribe.ps1 $env:TELEGRAM_VOICE_FILE  # PowerShell (after dot-sourcing env.ps1)
+```
