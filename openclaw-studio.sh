@@ -39,7 +39,7 @@
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-VERSION="5.3.2"
+VERSION="5.3.3"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${HOME}/.openclaw"
 WORKSPACE_DIR="${HOME}/.openclaw/workspace"
@@ -710,9 +710,8 @@ create_agent_interactive() {
     local skill_list=()
     if [[ -n "$skills_dir" ]]; then
         mapfile -t skill_list < <(ls -1 "$skills_dir" 2>/dev/null | head -30)
-    else
-        mapfile -t skill_list < <(ls -1 "${AGENTS_DIR}" 2>/dev/null | sed 's/\.md$//' | head -30)
     fi
+    # (no further fallback — AGENTS_DIR contains agent dirs, not skills)
 
     if [[ ${#skill_list[@]} -gt 0 ]]; then
         for i in "${!skill_list[@]}"; do
@@ -1156,12 +1155,14 @@ edit_agent() {
                 echo -e "  3) off        — ignore group messages"
                 read -rp "$(echo -e "${CYAN}Group policy${NC} [1-3]: ")" gp_choice
                 case $gp_choice in
-                    1) openclaw config set "channels.telegram.accounts.${agent_id}.groupPolicy" "open" 2>/dev/null \
-                        && print_success "Group policy: open" ;;
-                    2) openclaw config set "channels.telegram.accounts.${agent_id}.groupPolicy" "allowlist" 2>/dev/null \
-                        && print_success "Group policy: allowlist" ;;
-                    3) openclaw config set "channels.telegram.accounts.${agent_id}.groupPolicy" "off" 2>/dev/null \
-                        && print_success "Group policy: off" ;;
+                    1|2|3)
+                        local gp_val
+                        case $gp_choice in 1) gp_val="open" ;; 2) gp_val="allowlist" ;; 3) gp_val="off" ;; esac
+                        if openclaw config set "channels.telegram.accounts.${agent_id}.groupPolicy" "$gp_val" 2>/dev/null; then
+                            print_success "Group policy: $gp_val"
+                        else
+                            print_error "Failed to set group policy for '$agent_id'"
+                        fi ;;
                     *) print_info "Group policy unchanged" ;;
                 esac
                 ;;

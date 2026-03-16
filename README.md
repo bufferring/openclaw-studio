@@ -409,6 +409,15 @@ systemctl --user restart openclaw-gateway.service
 
 ## Changelog
 
+### v5.3.3
+- **Fixed (bash):** `Edit Agent > Group policy` — `&&` chain replaced with `if/else`; failure now prints an error instead of silently passing
+- **Fixed (bash):** Agent wizard skills fallback was listing `~/.openclaw/agents/` (agent dirs) instead of the openclaw skills directory
+- **Fixed (PS1):** `Remove-Agent` — now checks CLI exit code; prints warning instead of false success on failure
+- **Fixed (PS1):** `Edit-Agent` — `allowFrom` display no longer includes the lobster prefix line from `openclaw config get`
+- **Fixed (PS1):** `Deploy-FromAgentPool` — now writes agents.json tracking entry per deployed agent; now shows routing rules table (parity with bash)
+- **Added (PS1):** `Show-Checklist` — Whisper health check section added (runner, venv, model file); was missing, only existed in `Test-Health`
+- **Added (PS1):** `New-AgentInteractive` — "Set as default agent?" prompt added after first agent creation (parity with bash)
+
 ### v5.3.2
 - **Fixed:** `Edit Agent > Change model` — numeric selection (e.g. typing `2`) now resolves to the actual model string instead of passing the literal number to the CLI
 - **Fixed:** Model list in Edit Agent now uses a stable ordered provider list (was using unordered associative-array iteration, so numbers shifted between runs)

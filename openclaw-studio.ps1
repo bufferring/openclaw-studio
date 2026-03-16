@@ -46,7 +46,7 @@ if ($Debug) { $DebugPreference = "Continue" }
 # CONSTANTS & CONFIGURATION
 # =============================================================================
 
-$VERSION     = "5.3.2"
+$VERSION     = "5.3.3"
 $SCRIPT_DIR  = $PSScriptRoot
 $CONFIG_DIR  = Join-Path $env:USERPROFILE ".openclaw"
 $WORKSPACE_DIR = Join-Path $CONFIG_DIR "workspace"
@@ -723,6 +723,19 @@ function New-AgentInteractive {
         Write-Warn "Could not update agents.json: $_"
     }
 
+    # Set as default if first agent
+    try {
+        $curDef = (Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json).default_agent
+        if (-not $curDef -or $curDef -eq "null") {
+            if (Confirm-Action "Set '$agentName' as the default agent?" "y") {
+                $cfg2 = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+                $cfg2 | Add-Member -NotePropertyName "default_agent" -NotePropertyValue $agentId -Force
+                $cfg2 | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
+                Write-Success "Default agent: $agentId"
+            }
+        }
+    } catch {}
+
     Write-Host ""
     Write-Success "Agent '$emoji $agentName' ($agentId) configured"
     if ($botToken) {
@@ -817,11 +830,18 @@ function Deploy-FromAgentPool {
     }
 
     $ok = 0; $fail = 0
+
+    # Ensure agents.json exists
+    New-Item -ItemType Directory -Force -Path $CONFIG_DIR | Out-Null
+    if (-not (Test-Path $AGENTS_CONFIG)) {
+        '{"agents":{},"default_agent":null}' | Set-Content $AGENTS_CONFIG -Encoding UTF8
+    }
+
     foreach ($agentId in $agentIds) {
         Write-Host ""
         Write-Step "Deploying: $agentId"
-        $model     = $poolJson.agents.$agentId.model ?? "google/gemini-2.0-flash"
-        $role      = $poolJson.agents.$agentId.role  ?? "Agent"
+        $model     = if ($poolJson.agents.$agentId.model) { $poolJson.agents.$agentId.model } else { "google/gemini-2.0-flash" }
+        $role      = if ($poolJson.agents.$agentId.role)  { $poolJson.agents.$agentId.role  } else { "Agent" }
         $workspace = Join-Path $WORKSPACE_DIR $agentId
 
         if (New-AgentNative -AgentId $agentId -Model $model -Workspace $workspace) {
@@ -831,7 +851,15 @@ function Deploy-FromAgentPool {
             # Write auth-profiles.json
             $poolProvider = ($model -split "/")[0]
             $poolApiKey   = $poolJson.agents.$agentId.api_key
-            Write-AuthProfiles -AgentId $agentId -Provider $poolProvider -ApiKey $poolApiKey
+            Write-AuthProfiles -AgentId $agentId -Provider $poolProvider -ApiKey ($poolApiKey ?? "")
+
+            # Track in agents.json
+            $rec = [ordered]@{ id=$agentId; name=$role; emoji="🤖"; model=$model; native_cli=$true; source="agent-pool.json" }
+            try {
+                $cfg = Get-Content $AGENTS_CONFIG -Raw | ConvertFrom-Json
+                $cfg.agents | Add-Member -NotePropertyName $agentId -NotePropertyValue $rec -Force
+                $cfg | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
+            } catch {}
         } else { $fail++ }
     }
 
@@ -839,6 +867,16 @@ function Deploy-FromAgentPool {
     Write-Header "Deployment Summary"
     Write-Success "Deployed: $ok agents"
     if ($fail -gt 0) { Write-Err "Failed: $fail agents" }
+
+    # Show routing rules
+    if ($poolJson.routing) {
+        Write-Host ""
+        Write-Info "Routing rules:"
+        foreach ($key in $poolJson.routing.PSObject.Properties.Name) {
+            $targets = $poolJson.routing.$key -join ", "
+            Write-Host ("  {0,-15} -> {1}" -f $key, $targets) -ForegroundColor Cyan
+        }
+    }
 }
 
 # =============================================================================
@@ -908,7 +946,7 @@ function Edit-Agent {
     $curModel = if ($ag.model) { $ag.model } else { "" }
     $curName  = if ($ag.identityName) { $ag.identityName } elseif ($ag.name) { $ag.name } else { $agentId }
     $curAllow = ""
-    try { $curAllow = (openclaw config get "channels.telegram.accounts.$agentId.allowFrom" 2>$null | Out-String).Trim() } catch {}
+    try { $curAllow = (openclaw config get "channels.telegram.accounts.$agentId.allowFrom" 2>$null | Where-Object { $_ -notmatch "^\s*$|lobster|claw" } | Out-String).Trim() } catch {}
     $curGroupPolicy = ""
     try { $curGroupPolicy = (openclaw config get "channels.telegram.accounts.$agentId.groupPolicy" 2>$null | Out-String).Trim().Trim('"') } catch {}
     if (-not $curGroupPolicy) { $curGroupPolicy = "not set" }
@@ -1021,6 +1059,7 @@ function Remove-Agent {
     $agentId = $agents[$choice]
     if (Confirm-Action "Delete '$agentId'? Removes from OpenClaw too." "n") {
         openclaw agents delete $agentId 2>$null | Out-Null
+        $cliOk = ($LASTEXITCODE -eq 0)
         # Also remove from local tracking if present
         if (Test-Path $AGENTS_CONFIG) {
             try {
@@ -1029,7 +1068,8 @@ function Remove-Agent {
                 $cfg | ConvertTo-Json -Depth 10 | Set-Content $AGENTS_CONFIG -Encoding UTF8
             } catch {}
         }
-        Write-Success "Agent '$agentId' deleted"
+        if ($cliOk) { Write-Success "Agent '$agentId' deleted" }
+        else { Write-Warn "OpenClaw CLI reported failure for '$agentId'; removed from local tracking only" }
     }
 }
 
@@ -1177,6 +1217,31 @@ function Show-Checklist {
         } else {
             Write-Host "  ⚠ No skills (use option 2 to import)" -ForegroundColor Yellow
         }
+    }
+
+    Write-Host ""
+    Write-Info "── Voice Transcription (Whisper) ──"
+    $voiceEnabled = ""
+    try { $voiceEnabled = (openclaw config get "voiceTranscription.enabled" 2>$null | Where-Object { $_ -notmatch "^\s*$|lobster|claw" } | Out-String).Trim().Trim('"') } catch {}
+    if ($voiceEnabled -eq "true") {
+        if (Test-Path $VOICE_RUNNER) {
+            Write-Host "  ✓ Runner: $VOICE_RUNNER" -ForegroundColor Green
+        } else {
+            Write-Host "  ✗ Runner not found: $VOICE_RUNNER" -ForegroundColor Red
+        }
+        if (Test-Path $VOICE_VENV_DIR) {
+            Write-Host "  ✓ Python venv: $VOICE_VENV_DIR" -ForegroundColor Green
+        } else {
+            Write-Host "  ⚠ Python venv not found (re-run setup)" -ForegroundColor Yellow
+        }
+        if (Test-Path $VOICE_MODEL_FILE) {
+            $wm = (Get-Content $VOICE_MODEL_FILE -Raw).Trim()
+            Write-Host "  ✓ Model: $wm" -ForegroundColor Green
+        } else {
+            Write-Host "  ⚠ No model file at $VOICE_MODEL_FILE" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  ℹ Voice transcription not enabled (run setup to configure)" -ForegroundColor Blue
     }
 
     # Save to status file
